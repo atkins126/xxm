@@ -187,16 +187,17 @@ type
   TXxmSSPICache=class(TObject)
   private
     FLock:TRTLCriticalSection;
-    FCred:TCredHandle;
     FData:array of record
       ConnectionID:UInt64;
-      Context:TCtxtHandle;
+      Package:AnsiString;
+      Cred:TCredHandle;
+      Ctxt:TCtxtHandle;
     end;
     FDataSize,FDataIndex:integer;
   public
     constructor Create;
     destructor Destroy; override;
-    procedure GetContext(ConnectionID:UInt64;
+    procedure GetContext(ConnectionID:UInt64;const Package:AnsiString;
       var Cred:PCredHandle;var Ctxt:PCtxtHandle);
     procedure Clear(ConnectionID:UInt64);
   end;
@@ -239,19 +240,16 @@ begin
 end;
 
 procedure TXxmSSPICache.GetContext(ConnectionID:UInt64;
-  var Cred:PCredHandle;var Ctxt:PCtxtHandle);
+  const Package:AnsiString;var Cred:PCredHandle;var Ctxt:PCtxtHandle);
 var
   i:integer;
 begin
   EnterCriticalSection(FLock);
   try
-    if FCred.dwLower=nil then
-      if AcquireCredentialsHandle(nil,'NTLM',SECPKG_CRED_INBOUND,
-        nil,nil,nil,nil,@FCred,nil)<>0 then RaiseLastOSError;
-
     //TODO: more performant lookup algo?
     i:=0;
-    while (i<FDataIndex) and (FData[i].ConnectionID<>ConnectionID) do inc(i);
+    while (i<FDataIndex) and not((FData[i].ConnectionID=ConnectionID) and
+      (FData[i].Package=Package)) do inc(i);
     if i=FDataIndex then
      begin
       //not found: add, first find a free spot
@@ -268,13 +266,14 @@ begin
         inc(FDataIndex);
        end;
       FData[i].ConnectionID:=ConnectionID;
-      FData[i].Context.dwLower:=nil;
-      FData[i].Context.dwUpper:=nil;
+      FData[i].Package:=Package;
+      if AcquireCredentialsHandle(nil,PAnsiChar(Package),SECPKG_CRED_INBOUND,
+        nil,nil,nil,nil,@FData[i].Cred,nil)<>0 then RaiseLastOSError;
+      FData[i].Ctxt.dwLower:=nil;
+      FData[i].Ctxt.dwUpper:=nil;
      end;
-
-    Cred:=@FCred;
-    Ctxt:=@FData[i].Context;
-
+    Cred:=@FData[i].Cred;
+    Ctxt:=@FData[i].Ctxt;
   finally
     LeaveCriticalSection(FLock);
   end;
@@ -292,9 +291,13 @@ begin
     if i<FDataIndex then
      begin
       FData[i].ConnectionID:=0;
-      DeleteSecurityContext(@FData[i].Context);
-      FData[i].Context.dwLower:=nil;
-      FData[i].Context.dwUpper:=nil;
+      FData[i].Package:='';
+      DeleteSecurityContext(@FData[i].Ctxt);
+      FreeCredentialsHandle(@FData[i].Cred);
+      FData[i].Cred.dwLower:=nil;
+      FData[i].Cred.dwUpper:=nil;
+      FData[i].Ctxt.dwLower:=nil;
+      FData[i].Ctxt.dwUpper:=nil;
      end;
   finally
     LeaveCriticalSection(FLock);

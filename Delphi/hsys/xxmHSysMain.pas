@@ -6,7 +6,7 @@ uses
   Windows, SysUtils, ActiveX, Classes, xxm, xxmContext, xxmThreadPool,
   {$IFDEF HSYS1}httpapi1,{$ENDIF}
   {$IFDEF HSYS2}httpapi2,{$ENDIF}
-  xxmPReg, xxmPRegJson, xxmParams, xxmParUtils, xxmHeaders;
+  xxmPReg, xxmParams, xxmParUtils, xxmHeaders;
 
 const
   XxmHSysContextDataSize=$1000;
@@ -38,7 +38,7 @@ type
     FStringCache:array of AnsiString;
     FStringCacheSize,FStringCacheIndex:integer;
     FURI:AnsiString;
-    FRedirectPrefix,FSessionID:WideString;
+    FRedirectPrefix:WideString;
     FCookieParsed: boolean;
     FCookie: AnsiString;
     FCookieIdx: TParamIndexes;
@@ -51,24 +51,21 @@ type
     function GetResponseHeaderIndex(Idx:integer):WideString;
     procedure SetResponseHeaderIndex(Idx:integer;const Value:WideString);
     procedure ResponseStr(const Body,RedirMsg:WideString);
-    procedure AuthNTLM;
+    procedure AuthSChannel(const Package:AnsiString);
   protected
     function SendData(const Buffer; Count: LongInt): LongInt;
-    procedure DispositionAttach(const FileName: WideString); override;
     function ContextString(cs:TXxmContextString):WideString; override;
     procedure Redirect(const RedirectURL:WideString; Relative:boolean); override;
     procedure BeginRequest; override;
     procedure HandleRequest; override;
     procedure EndRequest; override;
     function Connected:boolean; override;
-    function GetSessionID:WideString; override;
     procedure SendHeader; override;
     function GetCookie(const Name:WideString):WideString; override;
     {$IFDEF HSYS2}
     function GetRawSocket: IStream; override;
     {$ENDIF}
 
-    function GetProjectEntry:TXxmProjectEntry; override;
     function GetRequestHeader(const Name: WideString): WideString; override;
     function GetResponseHeader(const Name:WideString):WideString; override;
     procedure AddResponseHeader(const Name, Value: WideString); override;
@@ -95,6 +92,7 @@ type
   {$IF not(Declared(FixedUInt))}
   FixedUInt=LongInt;
   PFixedUInt=PLongInt;
+  LargeInt=Int64;
   LargeUInt=LargeInt;
   XDWORD=LongInt;
   {$ELSE}
@@ -112,7 +110,7 @@ type
     constructor Create(HSysQueue:THandle;RequestID:THTTP_REQUEST_ID);
     destructor Destroy; override;
     { IStream }
-    function Seek(dlibMove: Largeint; dwOrigin: XDWORD;
+    function Seek(dlibMove: LargeInt; dwOrigin: XDWORD;
       out libNewPosition: LargeUInt): HResult; stdcall;
     function SetSize(libNewSize: LargeUInt): HResult; stdcall;
     function CopyTo(stm: IStream; cb: LargeUInt; out cbRead: LargeUInt;
@@ -197,7 +195,6 @@ begin
   FStringCacheIndex:=0;
   FCookieParsed:=false;
   FQueryStringIndex:=1;
-  FSessionID:='';//see GetSessionID
   FRedirectPrefix:='';
   if FReqHeaders<>nil then FReqHeaders.Reset; 
 end;
@@ -263,7 +260,7 @@ begin
   end;
 end;
 
-procedure TXxmHsysContext.AuthNTLM;
+procedure TXxmHsysContext.AuthSChannel(const Package:AnsiString);
 var
   s,t:AnsiString;
   c:PCredHandle;
@@ -273,78 +270,81 @@ var
   d:array of TSecBuffer;
   n:TSecPkgContextNames;
 begin
-  s:=AuthParse('NTLM');
-  if s='' then
-   begin
-    SetStatus(401,'Unauthorized');
-    SetResponseHeader(HttpHeaderConnection,'keep-alive');
-    SetResponseHeader(HttpHeaderWwwAuthenticate,'NTLM');
-    ResponseStr('<h1>Authorization required</h1>','401');
-   end
+  s:=XxmProjectCache.GetAuthCache(GetCookie(XxmSessionCookieName));
+  if s<>'' then
+    AuthSet(s,'') //TODO: update Expires?
   else
    begin
-    SSPICache.GetContext(FReq.ConnectionId,c,p);
-
-    SetLength(d,3);
-    SetLength(t,$10000);
-
-    d1.ulVersion:=SECBUFFER_VERSION;
-    d1.cBuffers:=2;
-    d1.pBuffers:=@d[0];
-
-    d[0].cbBuffer:=Length(s);
-    d[0].BufferType:=SECBUFFER_TOKEN;
-    d[0].pvBuffer:=@s[1];
-
-    d[1].cbBuffer:=0;
-    d[1].BufferType:=SECBUFFER_EMPTY;
-    d[1].pvBuffer:=nil;
-
-    d2.ulVersion:=SECBUFFER_VERSION;
-    d2.cBuffers:=1;
-    d2.pBuffers:=@d[2];
-
-    d[2].cbBuffer:=$10000;;
-    d[2].BufferType:=SECBUFFER_TOKEN;
-    d[2].pvBuffer:=@t[1];
-
-    if (p.dwLower=nil) and (p.dwUpper=nil) then p1:=nil else p1:=p;
-    r:=AcceptSecurityContext(c,p1,@d1,
-      ASC_REQ_REPLAY_DETECT or ASC_REQ_SEQUENCE_DETECT,SECURITY_NATIVE_DREP,
-      p,@d2,@f,nil);
-
-    if r=SEC_E_OK then
+    s:=AuthParse(string(Package));
+    if s='' then
      begin
-      r:=QueryContextAttributes(p,SECPKG_ATTR_NAMES,@n);
-      if r=0 then
-        AuthSet(n.sUserName,'')
-      else
-        AuthSet(AnsiString('???'+SysErrorMessage(r)),'');//raise?
-      SSPICache.Clear(FReq.ConnectionId);
-     end
-    else
-    if r=SEC_I_CONTINUE_NEEDED then
-     begin
-      SetLength(t,d[2].cbBuffer);
       SetStatus(401,'Unauthorized');
-      AddResponseHeader('Connection','keep-alive');
-      AddResponseHeader('WWW-Authenticate',WideString('NTLM '+Base64Encode(t)));
-      ResponseStr('<h1>Authorization required</h1>','401.1');
+      SetResponseHeader(HttpHeaderConnection,'keep-alive');
+      SetResponseHeader(HttpHeaderWwwAuthenticate,Package);
+      ResponseStr('<h1>Authorization required</h1>','401');
      end
     else
-      raise Exception.Create(SysErrorMessage(r));
+     begin
+      SSPICache.GetContext(FReq.ConnectionId,Package,c,p);
+
+      SetLength(d,3);
+      SetLength(t,$10000);
+
+      d1.ulVersion:=SECBUFFER_VERSION;
+      d1.cBuffers:=2;
+      d1.pBuffers:=@d[0];
+
+      d[0].cbBuffer:=Length(s);
+      d[0].BufferType:=SECBUFFER_TOKEN;
+      d[0].pvBuffer:=@s[1];
+
+      d[1].cbBuffer:=0;
+      d[1].BufferType:=SECBUFFER_EMPTY;
+      d[1].pvBuffer:=nil;
+
+      d2.ulVersion:=SECBUFFER_VERSION;
+      d2.cBuffers:=1;
+      d2.pBuffers:=@d[2];
+
+      d[2].cbBuffer:=$10000;;
+      d[2].BufferType:=SECBUFFER_TOKEN;
+      d[2].pvBuffer:=@t[1];
+
+      if (p.dwLower=nil) and (p.dwUpper=nil) then p1:=nil else p1:=p;
+      r:=AcceptSecurityContext(c,p1,@d1,
+        ASC_REQ_REPLAY_DETECT or ASC_REQ_SEQUENCE_DETECT,SECURITY_NATIVE_DREP,
+        p,@d2,@f,nil);
+
+      if r=SEC_E_OK then
+       begin
+        r:=QueryContextAttributes(p,SECPKG_ATTR_NAMES,@n);
+        if r=0 then
+          AuthSet(n.sUserName,'')
+        else
+          AuthSet(AnsiString('???'+SysErrorMessage(r)),'');//raise?
+        SSPICache.Clear(FReq.ConnectionId);
+        AuthStoreCache:=true;//see GetSessionID
+       end
+      else
+      if r=SEC_I_CONTINUE_NEEDED then
+       begin
+        SetLength(t,d[2].cbBuffer);
+        SetStatus(401,'Unauthorized');
+        AddResponseHeader('Connection','keep-alive');
+        AddResponseHeader('WWW-Authenticate',WideString(Package+' '+Base64Encode(t)));
+        ResponseStr('<h1>Authorization required</h1>','401.1');
+       end
+      else
+        raise Exception.Create(SysErrorMessage(r));
+     end;
    end;
 end;
 
 function TXxmHSysContext.GetProjectPage(const FragmentName: WideString):IXxmFragment;
 begin
-  if (ProjectEntry as TXxmProjectCacheEntry).NTLM then AuthNTLM;
+  if ProjectEntry.Negotiate then AuthSChannel('Negotiate') else
+    if ProjectEntry.NTLM then AuthSChannel('NTLM');
   Result:=inherited GetProjectPage(FragmentName);
-end;
-
-function TXxmHSysContext.GetProjectEntry: TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
 end;
 
 function TXxmHSysContext.Connected: boolean;
@@ -409,18 +409,6 @@ begin
   if x<>THTTP_HEADER_ID(-1) then Result:=UTF8ToWideString(FReq.Headers.KnownHeaders[x].pRawValue);
 end;
 
-procedure TXxmHSysContext.DispositionAttach(const FileName: WideString);
-var
-  s:WideString;
-  i:integer;
-begin
-  s:=FileName;
-  for i:=1 to Length(s) do
-    if AnsiChar(s[i]) in ['\','/',':','*','?','"','<','>','|'] then
-      s[i]:='_';
-  AddResponseHeader('Content-disposition','attachment; filename="'+s+'"');
-end;
-
 function TXxmHSysContext.GetCookie(const Name: WideString): WideString;
 begin
   if not(FCookieParsed) then
@@ -429,23 +417,7 @@ begin
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,UTF8Encode(Name)));
-end;
-
-function TXxmHSysContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
+  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 procedure TXxmHSysContext.Redirect(const RedirectURL: WideString;
@@ -550,7 +522,9 @@ begin
     for i:=0 to FReq.Headers.UnknownHeaderCount-1 do
       s:=s+PHTTP_UNKNOWN_HEADER_ARRAY(FReq.Headers.pUnknownHeaders)[i].pName+': '+
         PHTTP_UNKNOWN_HEADER_ARRAY(FReq.Headers.pUnknownHeaders)[i].pRawValue+#13#10;
-    FReqHeaders.Load(s+#13#10);
+    s:=s+#13#10;
+    FReqHeaders.Data:=s;
+    FReqHeaders.Load(1,Length(s));
    end;
   Result:=FReqHeaders;
 end;
@@ -604,7 +578,7 @@ var
   x:THTTP_HEADER_ID;
 begin
   inherited;
-  HeaderCheckName(Name);
+  HeaderNameSet(Name);
   HeaderCheckValue(Value);
   //TODO: encode when non-UTF7 characters?
   x:=HttpHeaderStart;
@@ -702,7 +676,7 @@ function TXxmHSysContext.GetRawSocket: IStream;
 var
   i:integer;
 begin
-  if FReqHeaders['Upgrade']='' then Result:=nil else
+  if GetRequestHeader('Upgrade')='' then Result:=nil else
    begin
     FContentType:='';
 
@@ -838,7 +812,7 @@ begin
   raise Exception.Create('TRawSocketData.Revert not supported');
 end;
 
-function TRawSocketData.Seek(dlibMove: Largeint; dwOrigin: XDWORD;
+function TRawSocketData.Seek(dlibMove: LargeInt; dwOrigin: XDWORD;
   out libNewPosition: LargeUInt): HResult;
 begin
   raise Exception.Create('TRawSocketData.Seek not supported');

@@ -9,6 +9,7 @@ function GetFileModifiedDateTime(const FilePath:AnsiString;
   var FileSize:Int64):TDateTime;
 function GetFileSignature(const Path: string): string;
 function Base64Encode(const x:AnsiString):AnsiString;
+function RawCompare(const a,b: string): integer;
 
 type
   TOwningHandleStream=class(THandleStream)
@@ -20,7 +21,11 @@ type
   private
     FHeap:THandle;
   protected
-    function Realloc(var NewCapacity: Integer): Pointer; override;
+    {$IF CompilerVersion<30}
+    function Realloc(var NewCapacity: LongInt): Pointer; override;
+    {$ELSE}
+    function Realloc(var NewCapacity: NativeInt): Pointer; override;
+    {$IFEND}
   public
     procedure AfterConstruction; override;
   end;
@@ -102,7 +107,11 @@ begin
   FHeap:=GetProcessHeap;
 end;
 
-function THeapStream.Realloc(var NewCapacity: Integer): Pointer;
+{$IF CompilerVersion<30}
+function THeapStream.Realloc(var NewCapacity: LongInt): Pointer;
+{$ELSE}
+function THeapStream.Realloc(var NewCapacity: NativeInt): Pointer;
+{$IFEND}
 const
   BlockSize=$10000;
 begin
@@ -176,5 +185,29 @@ begin
   //SetLength(Result,j);
 end;
 
+function RawCompare(const a,b: string): integer;
+var
+  i,al,bl:integer;
+begin
+  //assert caller already made strings lower-case
+  al:=Length(a);
+  bl:=Length(b);
+  i:=1;
+  Result:=0;
+  while (Result=0) and (i<=al) and (i<=bl) do
+    if a[i]<b[i] then
+      Result:=-1
+    else
+      if a[i]>b[i] then
+        Result:=1
+      else
+        inc(i);
+  if Result=0 then
+    if (i<=al) then
+      Result:=1
+    else
+      if (i<=bl) then
+        Result:=-1;
+end;
+
 end.
- 

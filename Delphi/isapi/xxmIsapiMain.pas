@@ -3,7 +3,7 @@ unit xxmIsapiMain;
 interface
 
 uses Windows, SysUtils, Classes, ActiveX, isapi4, xxm, xxmContext,
-  xxmPReg, xxmPRegJson, xxmParams, xxmParUtils, xxmHeaders, xxmThreadPool;
+  xxmPReg, xxmParams, xxmParUtils, xxmHeaders, xxmThreadPool;
 
 function GetExtensionVersion(var Ver: THSE_VERSION_INFO): BOOL; stdcall;
 function HttpExtensionProc(PECB: PEXTENSION_CONTROL_BLOCK): DWORD; stdcall;
@@ -17,7 +17,7 @@ type
     ecb: PEXTENSION_CONTROL_BLOCK;
     FIOState: integer;
     FIOStream: TStream;
-    FURI, FRedirectPrefix, FSessionID: WideString;
+    FURI, FRedirectPrefix: WideString;
     FReqHeaders: TRequestHeaders;
     FResHeaders: TResponseHeaders;
     FCookieParsed: boolean;
@@ -28,8 +28,6 @@ type
     procedure ServerFunction(HSERRequest: DWORD; Buffer: Pointer;
       Size, DataType: LPDWORD);
   protected
-    function GetSessionID: WideString; override;
-    procedure DispositionAttach(const FileName: WideString); override;
     function SendData(const Buffer; Count: LongInt): LongInt;
     function ContextString(cs: TXxmContextString): WideString; override;
     function Connected: Boolean; override;
@@ -39,7 +37,6 @@ type
     procedure Redirect(const RedirectURL: WideString; Relative:boolean); override;
     function GetCookie(const Name: WideString): WideString; override;
 
-    function GetProjectEntry: TXxmProjectEntry; override;
     function GetProjectPage(const FragmentName: WideString):IXxmFragment; override;
     procedure SendHeader; override;
     procedure SetStatus(Code: Integer; const Text: WideString); override;
@@ -106,7 +103,7 @@ begin
     if PageLoaderPool=nil then
       PageLoaderPool:=TXxmPageLoaderPool.Create(PoolMaxThreads);
     if XxmProjectCache=nil then
-      XxmProjectCache:=TXxmProjectCacheJson.Create;
+      XxmProjectCache:=TXxmProjectCache.Create;
     Result:=true;
   except
     on e:Exception do
@@ -237,7 +234,6 @@ procedure TXxmIsapiContext.BeginRequest;
 begin
   inherited;
   FCookieParsed:=false;
-  FSessionID:='';//see GetSessionID
   FIOState:=IOState_None;
   FIOStream:=nil;
   FResHeaders.Reset;
@@ -326,11 +322,6 @@ begin
   if (FIOState and 1)=0 then inherited;
 end;
 
-function TXxmIsapiContext.GetProjectEntry:TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
-end;
-
 function TXxmIsapiContext.GetProjectPage(const FragmentName: WideString):IXxmFragment;
 var
   p:IXxmPage;
@@ -398,19 +389,6 @@ begin
   end;
   //ecb.lpszPathInfo;
   //ecb.lpszPathTranslated;
-end;
-
-procedure TXxmIsapiContext.DispositionAttach(const FileName: WideString);
-var
-  s:WideString;
-  i:integer;
-begin
-  s:=FileName;
-  for i:=1 to Length(s) do
-    if AnsiChar(s[i]) in ['\','/',':','*','?','"','<','>','|'] then
-      s[i]:='_';
-  AddResponseHeader('Content-disposition','attachment; filename="'+s+'"');
-  FResHeaders.SetComplex('Content-disposition','attachment')['filename']:=s;
 end;
 
 function TXxmIsapiContext.SendData(const Buffer; Count: LongInt): LongInt;
@@ -538,28 +516,13 @@ begin
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=WideString(GetParamValue(FCookie,FCookieIdx,AnsiString(Name)));
-end;
-
-function TXxmIsapiContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
+  Result:=WideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 function TXxmIsapiContext.GetRequestHeaders: IxxmDictionaryEx;
 begin
-  FReqHeaders.Load(GetVar(ecb,'ALL_RAW'));
+  FReqHeaders.Data:=GetVar(ecb,'ALL_RAW');
+  FReqHeaders.Load(1,Length(FReqHeaders.Data));
   Result:=FReqHeaders;
 end;
 

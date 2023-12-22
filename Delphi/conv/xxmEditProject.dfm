@@ -2,8 +2,8 @@ object EditProjectMainForm: TEditProjectMainForm
   Left = 457
   Top = 125
   Caption = 'xxm Project Properties'
-  ClientHeight = 463
-  ClientWidth = 419
+  ClientHeight = 464
+  ClientWidth = 440
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -11,13 +11,11 @@ object EditProjectMainForm: TEditProjectMainForm
   Font.Name = 'Tahoma'
   Font.Style = []
   Menu = MainMenu1
-  OldCreateOrder = False
   Position = poScreenCenter
-  PixelsPerInch = 96
   TextHeight = 13
   object PageControl1: TPageControl
-    Left = 0
-    Top = 0
+    Left = 8
+    Top = 8
     Width = 417
     Height = 423
     ActivePage = TabSheet1
@@ -25,10 +23,6 @@ object EditProjectMainForm: TEditProjectMainForm
     object TabSheet1: TTabSheet
       BorderWidth = 4
       Caption = 'Project'
-      ExplicitLeft = 0
-      ExplicitTop = 0
-      ExplicitWidth = 0
-      ExplicitHeight = 0
       DesignSize = (
         401
         387)
@@ -38,62 +32,85 @@ object EditProjectMainForm: TEditProjectMainForm
         Width = 63
         Height = 13
         Caption = 'Project name'
+        FocusControl = txtProjectName
       end
       object Label2: TLabel
         Left = 0
         Top = 40
-        Width = 85
+        Width = 116
         Height = 13
-        Caption = 'Compile command'
+        Caption = 'Pre-compile command(s)'
+        FocusControl = txtPreCompCmds
+      end
+      object Label5: TLabel
+        Left = 0
+        Top = 128
+        Width = 98
+        Height = 13
+        Caption = 'Compile command(s)'
+        FocusControl = txtCompCmds
+      end
+      object Label6: TLabel
+        Left = 0
+        Top = 216
+        Width = 121
+        Height = 13
+        Caption = 'Post-compile command(s)'
+        FocusControl = txtPostCompCmds
       end
       object txtProjectName: TEdit
         Left = 0
         Top = 16
-        Width = 416
+        Width = 400
         Height = 21
         Anchors = [akLeft, akTop, akRight]
         TabOrder = 0
         Text = 'txtProjectName'
         OnChange = txtChange
-        ExplicitWidth = 400
-      end
-      object txtCompileCommand: TEdit
-        Left = 0
-        Top = 56
-        Width = 416
-        Height = 21
-        Anchors = [akLeft, akTop, akRight]
-        TabOrder = 1
-        Text = 'txtCompileCommand'
-        OnChange = txtChange
-        ExplicitWidth = 400
-      end
-      object btnRegisterLocal: TButton
-        Left = 0
-        Top = 88
-        Width = 153
-        Height = 25
-        Caption = 'Register for local handler'
-        TabOrder = 2
-        OnClick = btnRegisterLocalClick
       end
       object btnRegisterFile: TButton
         Left = 0
-        Top = 120
+        Top = 320
         Width = 153
         Height = 25
         Caption = 'Register with xxm.json...'
-        TabOrder = 3
+        TabOrder = 1
         OnClick = btnRegisterFileClick
+      end
+      object txtPreCompCmds: TMemo
+        Left = 0
+        Top = 56
+        Width = 400
+        Height = 70
+        Anchors = [akLeft, akTop, akRight]
+        ScrollBars = ssBoth
+        TabOrder = 2
+        WordWrap = False
+      end
+      object txtCompCmds: TMemo
+        Left = 0
+        Top = 144
+        Width = 400
+        Height = 70
+        Anchors = [akLeft, akTop, akRight]
+        ScrollBars = ssBoth
+        TabOrder = 3
+        WordWrap = False
+      end
+      object txtPostCompCmds: TMemo
+        Left = 0
+        Top = 232
+        Width = 400
+        Height = 70
+        Anchors = [akLeft, akTop, akRight]
+        ScrollBars = ssBoth
+        TabOrder = 4
+        WordWrap = False
       end
     end
     object TabSheet2: TTabSheet
       BorderWidth = 4
       Caption = 'Files'
-      ExplicitLeft = 0
-      ExplicitTop = 0
-      ExplicitWidth = 0
-      ExplicitHeight = 0
       object tvFiles: TTreeView
         Left = 0
         Top = 0
@@ -117,10 +134,6 @@ object EditProjectMainForm: TEditProjectMainForm
       BorderWidth = 4
       Caption = 'Parser Values'
       ImageIndex = 2
-      ExplicitLeft = 0
-      ExplicitTop = 0
-      ExplicitWidth = 0
-      ExplicitHeight = 0
       DesignSize = (
         401
         387)
@@ -130,6 +143,7 @@ object EditProjectMainForm: TEditProjectMainForm
         Width = 291
         Height = 13
         Caption = 'Project parser value defaults: (leave blank for default value)'
+        FocusControl = cbParserValue
       end
       object Label4: TLabel
         Left = 0
@@ -200,18 +214,17 @@ object EditProjectMainForm: TEditProjectMainForm
   end
   object StatusBar1: TStatusBar
     Left = 0
-    Top = 444
-    Width = 419
+    Top = 445
+    Width = 440
     Height = 19
     Panels = <
       item
         Width = 50
       end>
-    ExplicitTop = 424
   end
   object MainMenu1: TMainMenu
-    Left = 64
-    Top = 96
+    Left = 120
+    Top = 360
     object File1: TMenuItem
       Caption = '&File'
       object New1: TMenuItem
@@ -269,14 +282,14 @@ object EditProjectMainForm: TEditProjectMainForm
       'xxm Project (Web.xxmp)|web.xxmp|xxm Project (*.xxmp)|*.xxmp|All ' +
       'files (*.*)|*.*'
     Title = 'Open/Create xxm Project'
-    Left = 96
-    Top = 96
+    Left = 200
+    Top = 360
   end
   object ImageList1: TImageList
-    Left = 128
-    Top = 96
+    Left = 80
+    Top = 360
     Bitmap = {
-      494C01010E001300080010001000FFFFFFFFFF10FFFFFFFFFFFFFFFF424D3600
+      494C01010E001300040010001000FFFFFFFFFF10FFFFFFFFFFFFFFFF424D3600
       0000000000003600000028000000400000004000000001002000000000000040
       0000000000000000000000000000000000000000000000000000000000000000
       0000000000000000000066666600666666006666660066666600666666006666
@@ -813,7 +826,7 @@ object EditProjectMainForm: TEditProjectMainForm
   end
   object PopupMenu1: TPopupMenu
     Left = 160
-    Top = 96
+    Top = 360
     object Include1: TMenuItem
       Action = actInclude
     end
@@ -828,8 +841,8 @@ object EditProjectMainForm: TEditProjectMainForm
     end
   end
   object ActionList1: TActionList
-    Left = 32
-    Top = 96
+    Left = 40
+    Top = 360
     object actRefresh: TAction
       Category = 'Files'
       Caption = 'Refresh'
@@ -865,15 +878,15 @@ object EditProjectMainForm: TEditProjectMainForm
     Filter = 'Pascal Unit|*.pas|All files (*.*)|*.*'
     InitialDir = '.'
     Options = [ofHideReadOnly, ofAllowMultiSelect, ofEnableSizing]
-    Left = 192
-    Top = 96
+    Left = 240
+    Top = 360
   end
   object odXxmJson: TOpenDialog
     DefaultExt = 'json'
     FileName = 'xxm.json'
-    Filter = 'xxm.json|xxm.json|xxm.xml|xxm.xml|All files (*.*)|*.*'
+    Filter = 'xxm.json|xxm.json|All files (*.*)|*.*'
     Title = 'Select xxm.json to register with'
-    Left = 224
-    Top = 96
+    Left = 280
+    Top = 360
   end
 end

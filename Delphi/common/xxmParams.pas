@@ -162,11 +162,16 @@ function TXxmReqPars.Fill(Context: IXxmContext; PostData: TStream): boolean;
 var
   i,p,q,r,l:integer;
   ps:TStream;
-  pm,pn,pb,pd,pf,px:AnsiString;
+  pm,pd,pf,px:AnsiString;
   pa,pax:TParamIndexes;
+  pn:string;
   sn:TStreamNozzle;
 begin
   Result:=false;//return wether to free PostData
+  pa.ParsIndex:=0;
+  pa.ParsSize:=0;
+  pax.ParsIndex:=0;
+  pax.ParsSize:=0;
   pd:=UTF8Encode(Context.ContextString(csQueryString));
   //TODO: revert &#[0-9]+?;
   l:=Length(pd);
@@ -175,8 +180,9 @@ begin
    begin
     p:=r;
     q:=r;
-    while (q<=l) and (pd[q]<>'=') do inc(q);
-    r:=q+1;
+    while (q<=l) and (pd[q]<>'=') and (pd[q]<>'&') do inc(q);
+    r:=q;
+    if (q<=l) and (pd[q]='=') then inc(r);
     while (r<=l) and (pd[r]<>'&') do inc(r);
     Add(TXxmReqParGet.Create(Self,
       UTF8ToWideString(Copy(pd,p,q-p)),
@@ -189,7 +195,7 @@ begin
    begin
     ps.Seek(0,soFromBeginning);
     pm:=AnsiString(Context.ContextString(csPostMimeType));
-    pn:=SplitHeaderValue(pm,1,Length(pm),pa);//lower?
+    pn:=string(SplitHeaderValue(pm,1,Length(pm),pa));//lower?
 
     //pm='' with redirect in response to POST request, but StgMed prevails! drop it
     if pm='' then Result:=true else
@@ -203,7 +209,12 @@ begin
         SetLength(pd,p+q);
         q:=ps.Read(pd[p+1],q);
         inc(p,q);
-        if DataProgressAgent<>nil then DataProgressAgent.ReportProgress('','',p);
+        if DataProgressAgent<>nil then
+          try
+            DataProgressAgent.ReportProgress('','',p);
+          except
+            pointer(DataProgressAgent):=nil;
+          end;
       until q=0;
       SetLength(pd,p);
 
@@ -214,8 +225,9 @@ begin
        begin
         p:=r;
         q:=r;
-        while (q<=l) and (pd[q]<>'=') do inc(q);
-        r:=q+1;
+        while (q<=l) and (pd[q]<>'=') and (pd[q]<>'&') do inc(q);
+        r:=q;
+        if (q<=l) and (pd[q]='=') then inc(r);
         while (r<=l) and (pd[r]<>'&') do inc(r);
         Add(TXxmReqParPost.Create(Self,
           URLDecode(Copy(pd,p,q-p)),
@@ -227,50 +239,39 @@ begin
     else
     if pn=MimeFormData then
      begin
-      pb:=GetParamValue(pm,pa,'boundary');
-      if pb='' then raise Exception.Create('unable to get boundary from header for multipart/form-data');
-
-      sn:=TStreamNozzle.Create(ps,DataProgressAgent,FileProgressAgent,FileProgressStep);
+      sn:=TStreamNozzle.Create(ps,GetParamValue(pm,pa,'boundary'),
+        DataProgressAgent,FileProgressAgent,FileProgressStep);
       try
-        //initialization, find first boundary
-        sn.CheckBoundary(pb);
-
-        while not(sn.MultiPartDone) do
-         begin
-
+        repeat
           pm:='';
           pf:='';
           pd:=sn.GetHeader(pa);
-          for i:=0 to Length(pa)-1 do
-           begin
-            pn:=AnsiString(LowerCase(string(Copy(pd,pa[i].NameStart,pa[i].NameLength))));
-            if pn='content-disposition' then
+          for i:=0 to pa.ParsIndex-1 do
+            if pa.Pars[i].NameIndex=KnownHeaderIndex(khContentDisposition) then
              begin
-              pn:=SplitHeaderValue(pd,pa[i].ValueStart,pa[i].ValueLength,pax);
-              //assert pn='form-data'
+              SplitHeaderValue(pd,
+                pa.Pars[i].ValueStart,pa.Pars[i].ValueLength,pax);
+              //assert ='form-data'
               px:=GetParamValue(pd,pax,'name');
               pf:=GetParamValue(pd,pax,'filename');
              end
             else
-            if pn='content-type' then pm:=Copy(pd,pa[i].ValueStart,pa[i].ValueLength)
+            if pa.Pars[i].NameIndex=KnownHeaderIndex(khContentType)  then
+              pm:=Copy(pd,pa.Pars[i].ValueStart,pa.Pars[i].ValueLength)
             else
               ;//raise Exception.Create('Unknown multipart header "'+pn+'"');
-           end;
-
           //TODO: transfer encoding?
-
           if pm='' then
-            Add(TXxmReqParPost.Create(Self,WideString(px),UTF8ToWideString(sn.GetString(pb))))
+            Add(TXxmReqParPost.Create(Self,WideString(px),
+              UTF8ToWideString(sn.GetString)))
           else
            begin
-            sn.GetData(pb,px,pf,p,q);
+            sn.GetData(px,pf,p,q);
             Add(TXxmReqParPostFile.Create(Self,WideString(px),
               UTF8ToWideString(pf),//TODO: encoding from header?
               WideString(pm),ps,p,q));
            end;
-
-         end;
-
+        until sn.MultiPartDone;
       finally
         sn.Free;
       end;
@@ -283,8 +284,18 @@ begin
     ps.Seek(0,soFromBeginning);
    end;
   FFilled:=true;
-  DataProgressAgent:=nil;
-  FileProgressAgent:=nil;
+  try
+    DataProgressAgent:=nil;
+  except
+    //silent
+    pointer(DataProgressAgent):=nil;
+  end;
+  try
+    FileProgressAgent:=nil;
+  except
+    //silent
+    pointer(FileProgressAgent):=nil;
+  end;
 end;
 
 procedure TXxmReqPars.Add(Par: IXxmParameter);
@@ -296,8 +307,8 @@ begin
     inc(FParamsSize,GrowStep);
     SetLength(FParams,FParamsSize);
    end;
-  FParams[FParamsCount]:=Par;
   Par._AddRef;
+  FParams[FParamsCount]:=Par;
   inc(FParamsCount);
 end;
 

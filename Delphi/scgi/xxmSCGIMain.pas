@@ -4,7 +4,7 @@ interface
 
 uses
   SysUtils, Windows, xxmSock, xxmThreadPool, xxm, Classes, ActiveX,
-  xxmContext, xxmPReg, xxmPRegJson, xxmParams, xxmParUtils, xxmHeaders,
+  xxmContext, xxmPReg, xxmParams, xxmParUtils, xxmHeaders,
   xxmKeptCon, xxmSpoolingCon;
 
 type
@@ -31,7 +31,7 @@ type
     end;
     FCGIValuesSize,FCGIValuesCount:integer;
     FHTTPVersion,FVerb:AnsiString;
-    FURI,FRedirectPrefix,FSessionID:WideString;
+    FURI,FRedirectPrefix:WideString;
     FCookieParsed: boolean;
     FCookie: AnsiString;
     FCookieIdx: TParamIndexes;
@@ -39,14 +39,11 @@ type
     procedure Load(Socket:TTcpSocket);
     function GetCGIValue(const Name: AnsiString): AnsiString;
   protected
-    function GetSessionID: WideString; override;
-    procedure DispositionAttach(const FileName: WideString); override;
     function ContextString(cs: TXxmContextString): WideString; override;
     function Connected: Boolean; override;
     procedure Redirect(const RedirectURL: WideString; Relative:boolean); override;
     function GetCookie(const Name: WideString): WideString; override;
 
-    function GetProjectEntry:TXxmProjectEntry; override;
     procedure SendHeader; override;
     function GetRequestHeader(const Name: WideString): WideString; override;
     procedure AddResponseHeader(const Name, Value: WideString); override;
@@ -171,7 +168,7 @@ begin
   //
   CoInitialize(nil);
   SetErrorMode(SEM_FAILCRITICALERRORS);
-  XxmProjectCache:=TXxmProjectCacheJson.Create;
+  XxmProjectCache:=TXxmProjectCache.Create;
   ContextPool:=TXxmContextPool.Create(TXxmSCGIContext);
   KeptConnections:=TXxmKeptConnections.Create;
   SpoolingConnections:=TXxmSpoolingConnections.Create;
@@ -263,7 +260,6 @@ begin
   FResHeaders.Reset;
   FCookieParsed:=false;
   FQueryStringIndex:=1;
-  FSessionID:='';//see GetSessionID
   FURI:='';//see Execute
   FRedirectPrefix:='';
   FCGIValuesCount:=0;
@@ -404,13 +400,14 @@ begin
     until m=-1;
 
     z:=Copy(x,j,l-j+1);
-    FReqHeaders.Load(y);
+    FReqHeaders.Data:=y;
+    FReqHeaders.Load(1,Length(y));
 
     x:=GetCGIValue('SERVER_PROTOCOL');//http or https
     i:=1;
     l:=Length(x);
     while (i<=l) and (x[i]<>'/') do inc(i);
-    y:=AnsiString(FReqHeaders['Host']);
+    y:=FReqHeaders.KnownHeader(khHost);
     if y='' then y:='localhost';//if not port=80 then +':'+?
     FRedirectPrefix:=LowerCase(string(Copy(x,1,i-1)))+'://'+string(y);
 
@@ -427,11 +424,9 @@ begin
       FURI:=UTF8ToWideString(y);
       //FURLPrefix:= should be ok
      end;
-
     FURL:=FRedirectPrefix+FURI;
 
     ProcessRequestHeaders;
-    //if XxmProjectCache=nil then XxmProjectCache:=TXxmProjectCacheXml.Create;
 
     if (FURI<>'') and (FURI[1]='/') then
      begin
@@ -455,7 +450,7 @@ begin
     PreProcessRequest;
 
     //if Verb<>'GET' then?
-    y:=AnsiString(FReqHeaders['Content-Length']);
+    y:=FReqHeaders.KnownHeader(khContentLength);
     if y<>'' then
      begin
       si:=StrToInt(string(y));
@@ -471,7 +466,7 @@ begin
        end;
       s.Size:=si;
       s.Position:=0;
-      FPostData:=THandlerReadStreamAdapter.Create(FSocket,si,s,z);
+      FPostData:=THandlerReadStreamAdapter.Create(FSocket,si,s,z,1,Length(z));
      end;
 
     if FVerb='OPTIONS' then
@@ -513,11 +508,6 @@ begin
   end;
 end;
 
-function TXxmSCGIContext.GetProjectEntry:TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
-end;
-
 function TXxmSCGIContext.GetProjectPage(const FragmentName: WideString):IXxmFragment;
 begin
   Result:=inherited GetProjectPage(FragmentName);
@@ -536,14 +526,14 @@ begin
     csExtraInfo:Result:='';//???
     csVerb:Result:=WideString(FVerb);
     csQueryString:Result:=Copy(FURI,FQueryStringIndex,Length(FURI)-FQueryStringIndex+1);
-    csUserAgent:Result:=FReqHeaders['User-Agent'];
-    csAcceptedMimeTypes:Result:=FReqHeaders['Accept'];
-    csPostMimeType:Result:=FReqHeaders['Content-Type'];
+    csUserAgent:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khUserAgent));
+    csAcceptedMimeTypes:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khAccept));
+    csPostMimeType:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khContentType));
     csURL:Result:=GetURL;
     csProjectName:Result:=FProjectName;
     csLocalURL:Result:=FFragmentName;
-    csReferer:Result:=FReqHeaders['Referer'];
-    csLanguage:Result:=FReqHeaders['Accept-Language'];
+    csReferer:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khReferer));
+    csLanguage:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khAcceptLanguage));
     csRemoteAddress:Result:=UTF8ToWideString(GetCGIValue('REMOTE_ADDR'));
     csRemoteHost:Result:=UTF8ToWideString(GetCGIValue('REMOTE_HOST'));
     csAuthUser,csAuthPassword:Result:=UTF8ToWideString(AuthValue(cs));
@@ -553,44 +543,15 @@ begin
   end;
 end;
 
-procedure TXxmSCGIContext.DispositionAttach(const FileName: WideString);
-var
-  s:WideString;
-  i:integer;
-begin
-  s:=FileName;
-  for i:=1 to Length(s) do
-    if AnsiChar(s[i]) in ['\','/',':','*','?','"','<','>','|'] then
-      s[i]:='_';
-  AddResponseHeader('Content-disposition','attachment; filename="'+s+'"');
-  FResHeaders.SetComplex('Content-disposition','attachment')['filename']:=s;
-end;
-
 function TXxmSCGIContext.GetCookie(const Name: WideString): WideString;
 begin
   if not(FCookieParsed) then
    begin
-    FCookie:=UTF8Encode(FReqHeaders['Cookie']);
+    FCookie:=UTF8Encode(FReqHeaders.KnownHeader(khCookie));
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,UTF8Encode(Name)));
-end;
-
-function TXxmSCGIContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
+  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 procedure TXxmSCGIContext.Redirect(const RedirectURL: WideString; Relative: boolean);
@@ -678,7 +639,7 @@ begin
   //'If-Modified-Since' ? 304
   //'Connection: Keep-alive' ? with sent Content-Length
   //FResHeaders['Server']:=HttpSelfVersion; //X-Powered-By?
-  FURL:=FReqHeaders['Host'];
+  FURL:=UTF8ToWideString(FReqHeaders.KnownHeader(khHost));
   if FURL='' then
    begin
     FURL:='localhost';//TODO: from binding? setting?
@@ -708,7 +669,7 @@ end;
 
 function TXxmSCGIContext.GetRawSocket: IStream;
 begin
-  if FReqHeaders['Upgrade']='' then Result:=nil else
+  if FReqHeaders.KnownHeader(khUpgrade)='' then Result:=nil else
    begin
     FContentType:='';
     CheckSendStart(false);

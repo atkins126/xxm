@@ -4,8 +4,7 @@ interface
 
 uses
   SysUtils, blcksock, xxm, Classes, ActiveX, xxmContext, xxmThreadPool,
-  xxmPReg, xxmPRegJson, xxmParams, xxmParUtils, xxmHeaders,
-  xxmSynaKept, xxmSynaSpool;
+  xxmPReg, xxmParams, xxmParUtils, xxmHeaders, xxmSynaKept, xxmSynaSpool;
 
 type
   TXxmSynaServer = class(TThread)
@@ -30,7 +29,7 @@ type
     FReqHeaders:TRequestHeaders;
     FResHeaders:TResponseHeaders;
     FHTTPVersion,FVerb:AnsiString;
-    FURI,FRedirectPrefix,FSessionID:WideString;
+    FURI,FRedirectPrefix:WideString;
     FCookieParsed: boolean;
     FCookie: AnsiString;
     FCookieIdx: TParamIndexes;
@@ -38,15 +37,12 @@ type
     procedure Accept(SocketHandle:THandle);
   protected
 
-    function GetSessionID: WideString; override;
-    procedure DispositionAttach(const FileName: WideString); override;
     function SendData(const Buffer; Count: LongInt): LongInt;
     function ContextString(cs: TXxmContextString): WideString; override;
     function Connected: Boolean; override;
     procedure Redirect(const RedirectURL: WideString; Relative:boolean); override;
     function GetCookie(const Name: WideString): WideString; override;
 
-    function GetProjectEntry:TXxmProjectEntry; override;
     procedure SendHeader; override;
     function GetRequestHeader(const Name: WideString): WideString; override;
     procedure AddResponseHeader(const Name, Value: WideString); override;
@@ -184,7 +180,7 @@ begin
   //
   CoInitialize(nil);
   SetErrorMode(SEM_FAILCRITICALERRORS);
-  XxmProjectCache:=TXxmProjectCacheJson.Create;
+  XxmProjectCache:=TXxmProjectCache.Create;
   ContextPool:=TXxmContextPool.Create(TXxmSynaContext);
   PageLoaderPool:=TXxmPageLoaderPool.Create(Threads);
   KeptConnections:=TXxmKeptConnections.Create;
@@ -300,7 +296,6 @@ begin
   FResHeaders.Reset;
   FCookieParsed:=false;
   FQueryStringIndex:=1;
-  FSessionID:='';//see GetSessionID
   FURI:='';//see Execute
   FRedirectPrefix:='';
 end;
@@ -313,7 +308,8 @@ begin
   except
     //silent (log?)
   end;
-  FSocket.CloseSocket;//Disconnect
+  if FSocket<>nil then
+    FSocket.CloseSocket;//Disconnect
 end;
 
 procedure TXxmSynaContext.FlushFinal;
@@ -346,10 +342,11 @@ end;
 procedure TXxmSynaContext.HandleRequest;
 var
   i,j,l,xi:integer;
-  x,y:AnsiString;
+  x:AnsiString;
   s:TStream;
   si:int64;
   tc:cardinal;
+  cl:string;
 begin
   try
 
@@ -377,7 +374,6 @@ begin
     //command line and headers
     tc:=GetTickCount;
     x:=FSocket.RecvPacket(DefaultRecvTimeout);
-    y:='';
     l:=Length(x);
     j:=0;
     xi:=1;
@@ -411,7 +407,6 @@ begin
        end
       else
        begin
-        y:=y+Copy(x,i,xi-i)+#13#10;
         if i=xi then j:=-1 else
          begin
           inc(j);
@@ -419,14 +414,13 @@ begin
             raise EXxmMaximumHeaderLines.Create(SXxmMaximumHeaderLines);
          end;
        end;
-      inc(xi);
+      inc(xi);//#13
       if (xi<=l) and (x[xi]=#10) then inc(xi);
     until j=-1;
-    x:=Copy(x,xi,l-xi+1);
-    FReqHeaders.Load(y);
+    FReqHeaders.Data:=x;
+    FReqHeaders.Load(xi,l-xi+1);
 
     ProcessRequestHeaders;
-    //if XxmProjectCache=nil then XxmProjectCache:=TXxmProjectCacheXml.Create;
 
     if (FURI<>'') and (FURI[1]='/') then
      begin
@@ -450,10 +444,10 @@ begin
     PreProcessRequest;
 
     //if Verb<>'GET' then?
-    y:=AnsiString(FReqHeaders['Content-Length']);
-    if y<>'' then
+    cl:=FReqHeaders['Content-Length'];
+    if cl<>'' then
      begin
-      si:=StrToInt(string(y));
+      si:=StrToInt(cl);
       if si<PostDataThreshold then
         s:=THeapStream.Create
       else
@@ -508,11 +502,6 @@ begin
   end;
 end;
 
-function TXxmSynaContext.GetProjectEntry:TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
-end;
-
 function TXxmSynaContext.GetProjectPage(const FragmentName: WideString):IXxmFragment;
 begin
   Result:=inherited GetProjectPage(FragmentName);
@@ -548,19 +537,6 @@ begin
   end;
 end;
 
-procedure TXxmSynaContext.DispositionAttach(const FileName: WideString);
-var
-  s:WideString;
-  i:integer;
-begin
-  s:=FileName;
-  for i:=1 to Length(s) do
-    if AnsiChar(s[i]) in ['\','/',':','*','?','"','<','>','|'] then
-      s[i]:='_';
-  AddResponseHeader('Content-disposition','attachment; filename="'+s+'"');
-  FResHeaders.SetComplex('Content-disposition','attachment')['filename']:=s;
-end;
-
 function TXxmSynaContext.GetCookie(const Name: WideString): WideString;
 begin
   if not(FCookieParsed) then
@@ -569,23 +545,7 @@ begin
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,UTF8Encode(Name)));
-end;
-
-function TXxmSynaContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
+  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 procedure TXxmSynaContext.Redirect(const RedirectURL: WideString;

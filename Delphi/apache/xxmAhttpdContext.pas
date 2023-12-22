@@ -3,7 +3,7 @@ unit xxmAhttpdContext;
 interface
 
 uses SysUtils, Classes, ActiveX, httpd24, xxm, xxmContext,
-  xxmHeaders, xxmParams, xxmPReg, xxmPRegJson, xxmParUtils;
+  xxmHeaders, xxmParams, xxmPReg, xxmParUtils;
 
 type
   TxxmAhttpdContext=class(TXxmGeneralContext
@@ -14,13 +14,11 @@ type
   private
     rq: PRequest;
     FConnected: boolean;
-    FRedirectPrefix, FSessionID: WideString;
+    FRedirectPrefix: WideString;
     FCookieParsed: boolean;
     FCookie: AnsiString;
     FCookieIdx: TParamIndexes;
   protected
-    function GetSessionID:WideString; override;
-    procedure DispositionAttach(const FileName: WideString); override;
     function ContextString(cs:TXxmContextString):WideString; override;
     function Connected:boolean; override;
     procedure BeginRequest; override;
@@ -30,7 +28,6 @@ type
     function GetCookie(const Name:WideString):WideString; override;
     procedure SendHeader; override;
     function SendData(const Buffer; Count: LongInt): LongInt;
-    function GetProjectEntry:TXxmProjectEntry; override;
     function GetRequestHeader(const Name: WideString): WideString; override;
     procedure AddResponseHeader(const Name, Value: WideString); override;
     procedure SetStatus(Code:integer;const Text:WideString); override;
@@ -58,6 +55,8 @@ resourcestring
 procedure TxxmAhttpdContext.AfterConstruction;
 begin
   SendDirect:=SendData;
+  FCookieIdx.ParsIndex:=0;
+  FCookieIdx.ParsSize:=0;
   inherited;
 end;
 
@@ -86,7 +85,6 @@ begin
   FConnected:=true;
   FRedirectPrefix:='';//see Execute
   FCookieParsed:=false;
-  FSessionID:='';//see GetSessionID
 end;
 
 procedure TxxmAhttpdContext.EndRequest;
@@ -102,7 +100,7 @@ var
 begin
   try
     //AddResponseHeader('X-Powered-By',SelfVersion);
-    if XxmProjectCache=nil then XxmProjectCache:=TXxmProjectCacheJson.Create;
+    if XxmProjectCache=nil then XxmProjectCache:=TXxmProjectCache.Create;
 
     //parse url
     x:=rq.uri;
@@ -140,11 +138,6 @@ begin
   end;
 end;
 
-function TxxmAhttpdContext.GetProjectEntry: TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
-end;
-
 function TxxmAhttpdContext.Connected: boolean;
 begin
   //Result:=not(rq.connection.aborted);
@@ -177,14 +170,6 @@ begin
   end;
 end;
 
-procedure TxxmAhttpdContext.DispositionAttach(const FileName: WideString);
-begin
-  if FileName='' then
-    AddResponseHeader('Content-Disposition','attachment')
-  else
-    AddResponseHeader('Content-Disposition','attachment; filename="'+FileName+'"');
-end;
-
 function TxxmAhttpdContext.GetCookie(const Name: WideString): WideString;
 begin
   if not(FCookieParsed) then
@@ -193,7 +178,7 @@ begin
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,UTF8Encode(Name)));
+  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 function TxxmAhttpdContext.GetRequestHeaders: IxxmDictionaryEx;
@@ -206,22 +191,6 @@ function TxxmAhttpdContext.GetResponseHeaders: IxxmDictionaryEx;
 begin
   //TODO: check freed by ref counting?
   Result:=TxxmAhttpdTable.Create(rq.pool,rq.headers_out);
-end;
-
-function TxxmAhttpdContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
 end;
 
 procedure TxxmAhttpdContext.Redirect(const RedirectURL: WideString;
@@ -289,7 +258,7 @@ end;
 
 procedure TxxmAhttpdContext.AddResponseHeader(const Name, Value: WideString);
 begin
-  HeaderCheckName(Name);
+  HeaderNameSet(Name);
   HeaderCheckValue(Value);
   if SettingCookie then
    begin

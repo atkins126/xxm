@@ -12,7 +12,7 @@ It implements IXxmPage, so you can call xxmFReg's
 with your inheriting class (or any alternative fragment registry you use)
 to determine which URL the WebSocket will be available with.
 
-  $Rev: 462 $ $Date: 2021-02-26 16:01:20 +0100 (vr, 26 feb 2021) $
+  $Rev: 507 $ $Date: 2023-12-20 22:12:29 +0100 (wo, 20 dec 2023) $
 
 }
 {$D-}
@@ -23,6 +23,17 @@ interface
 uses SysUtils, xxm;
 
 type
+
+  {$IF not(Declared(FixedUInt))}
+  FixedUInt=LongInt;
+  PFixedUInt=PLongInt;
+  LargeInt=Int64;
+  LargeUInt=LargeInt;
+  XDWORD=LongInt;
+  {$ELSE}
+  XDWORD=LongInt;
+  {$IFEND}
+
   TXxmWebSocket=class(TXxmPage, IXxmRawSocket)
   private
     FMaxFragmentSize:int64;
@@ -46,9 +57,9 @@ type
       const Values: array of OleVariant; const Objects: array of TObject); override;
 
     //IXxmRawSocket
-    function Read(pv: Pointer; cb: Longint; pcbRead: PLongint): HResult;
+    function Read(pv: Pointer; cb: FixedUInt; pcbRead: PFixedUInt): HResult;
       stdcall;
-    function Write(pv: Pointer; cb: Longint; pcbWritten: PLongint): HResult;
+    function Write(pv: Pointer; cb: FixedUInt; pcbWritten: PFixedUInt): HResult;
       stdcall;
     function DataReady(TimeoutMS: cardinal): boolean;
     procedure ClosingSocket;
@@ -127,6 +138,9 @@ asm
   bswap eax
 end;
 }
+
+{$Q-}
+{$R-}
 
 function SwapEndian(Value: integer): integer; overload;
 var
@@ -284,6 +298,7 @@ procedure TXxmWebSocket.Build(const Context: IXxmContext;
   const Objects: array of TObject);
 var
   hReq,hRes:IxxmDictionaryEx;
+  hConn,hUpgr:string;
   h:TSHA1Hash;
 begin
   //inherited;
@@ -292,8 +307,10 @@ begin
   
   hReq:=(Context as IxxmHttpHeaders).RequestHeaders;
   hRes:=(Context as IxxmHttpHeaders).ResponseHeaders;
-  if (CompareText(hReq['Connection'],'upgrade')=0)
-    and (CompareText(hReq['Upgrade'],'websocket')=0) then
+  hConn:=LowerCase(string(hReq['Connection']));
+  hUpgr:=LowerCase(string(hReq['Upgrade']));
+  if ((hConn='upgrade') or (hConn='keep-alive, upgrade'))
+    and (hUpgr='websocket') then
    begin
     //TODO: check HTTP 1.1 or more
     //TODO: check hReq['Origin']
@@ -304,7 +321,7 @@ begin
     Context.SetStatus(101,'Switching Protocols');
     hRes['Connection']:='Upgrade';
     hRes['Upgrade']:='websocket';
-    h:=SHA1Hash(hReq['Sec-WebSocket-Key']
+    h:=SHA1Hash(UTF8String(hReq['Sec-WebSocket-Key'])
       +'258EAFA5-E914-47DA-95CA-C5AB0DC85B11');
     hRes['Sec-WebSocket-Accept']:=base64encode(h,20);
 
@@ -338,15 +355,15 @@ begin
    end;
 end;
 
-function TXxmWebSocket.Read(pv: Pointer; cb: Integer;
-  pcbRead: PLongint): HResult;
+function TXxmWebSocket.Read(pv: Pointer; cb: FixedUInt;
+  pcbRead: PFixedUInt): HResult;
 begin
   //IXxmRawSocket on TXxmWebSocket for suspend/resume only
   Result:=E_NOTIMPL;
 end;
 
-function TXxmWebSocket.Write(pv: Pointer; cb: Integer;
-  pcbWritten: PLongint): HResult;
+function TXxmWebSocket.Write(pv: Pointer; cb: FixedUInt;
+  pcbWritten: PFixedUInt): HResult;
 begin
   //IXxmRawSocket on TXxmWebSocket for suspend/resume only
   Result:=E_NOTIMPL;

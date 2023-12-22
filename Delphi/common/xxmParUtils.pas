@@ -24,14 +24,26 @@ type
     function _Release:integer; stdcall;
   end;
 
-  TParamIndexes=array of record
-    NameStart,NameLength,ValueStart,ValueLength:integer;
+  TParamIndexes=record
+    Pars:array of record
+      ValueStart,ValueLength,//SortIndex,
+      NameStart,NameLength,NameIndex:integer;
+    end;
+    ParsIndex,ParsSize:integer;
   end;
+
+  TKnownHeaderName=(khContentType,khContentLength,khContentDisposition,
+    khConnection,khTransferEncoding,khCacheControl,
+    khAccept,khAuthorization,khWWWAuthenticate,khUpgrade,
+    khServer,khHost,khUserAgent,khReferer,khLocation,
+    khAcceptEncoding,khAcceptLanguage,
+    khIfModifiedSince,khLastModified,khExpires,
+    khCookie,khSetCookie);
+
 
   TRequestHeaders=class(TControlledLifeTimeObject,
     IxxmDictionary, IxxmDictionaryEx)
   private
-    FData:AnsiString;
     FIdx:TParamIndexes;
     function GetItem(Name:OleVariant):WideString;
     procedure SetItem(Name:OleVariant;const Value:WideString);
@@ -39,19 +51,21 @@ type
     procedure SetName(Idx:integer;Value:WideString);
     function GetCount:integer;
   public
+    Data:AnsiString;
     constructor Create;
     destructor Destroy; override;
-    procedure Load(const Data:AnsiString);
+    procedure Load(StartIndex,DataLength:integer);
     procedure Reset;
     property Item[Name: OleVariant]:WideString read GetItem write SetItem; default;
     property Name[Idx: integer]:WideString read GetName write SetName;
     property Count:integer read GetCount;
     function Complex(Name:OleVariant;out Items:IxxmDictionary):WideString;
+    function KnownHeader(Header:TKnownHeaderName):AnsiString;
   end;
 
   TRequestSubValues=class(TInterfacedObject, IxxmDictionary)
   private
-    FData:WideString;
+    FData:AnsiString;
     FIdx:TParamIndexes;
     function GetItem(Name:OleVariant):WideString;
     procedure SetItem(Name:OleVariant;const Value:WideString);
@@ -59,7 +73,7 @@ type
     procedure SetName(Idx:integer; Value:WideString);
     function GetCount:integer;
   public
-    constructor Create(const Data:WideString;ValueStart,ValueLength:integer;
+    constructor Create(const Data:AnsiString;ValueStart,ValueLength:integer;
       var FirstValue:WideString);
     destructor Destroy; override;
     property Item[Name:OleVariant]:WideString read GetItem write SetItem; default;
@@ -74,6 +88,7 @@ type
   private
     FItems:array of record
       Name,Value:WideString;
+      NameIndex:integer;
       SubValues:TResponseSubValues;
     end;
     FItemsSize,FItemsCount:integer;
@@ -102,6 +117,7 @@ type
   private
     FItems:array of record
       Name,Value:WideString;
+      NameIndex:integer;
     end;
     FItemsSize,FItemsCount:integer;
     FBuilt:boolean;
@@ -124,40 +140,46 @@ type
   private
     FSource: TStream;
     SourceAtEnd: boolean;
-    Data: AnsiString;
+    Data, FBoundary: AnsiString;
     Size, Index, Done, ReportStep: integer;
     FDataAgent, FFileAgent: IxxmUploadProgressAgent;
-    function Ensure(EnsureSize: integer): boolean;
+    function Ensure(EnsureSize: integer;
+      const FieldName, FileName: AnsiString): boolean;
     procedure Flush;
     procedure SkipWhiteSpace;
   public
-    constructor Create(Source: TStream; DataProgressAgent,
-      FileProgressAgent: IxxmUploadProgressAgent; FileProgressStep: integer);
+    constructor Create(Source: TStream; const Boundary: AnsiString;
+      DataProgressAgent, FileProgressAgent: IxxmUploadProgressAgent;
+      FileProgressStep: integer);
     destructor Destroy; override;
-    procedure CheckBoundary(var Boundary: AnsiString);
     function GetHeader(var Params: TParamIndexes): AnsiString;
-    function GetString(const Boundary: AnsiString): AnsiString;
-    procedure GetData(const Boundary, FieldName, FileName: AnsiString;
+    function GetString: AnsiString;
+    procedure GetData(const FieldName, FileName: AnsiString;
       var Pos: integer; var Len: integer);
     function MultiPartDone: boolean;
   end;
 
   EXxmRequestHeadersReadOnly=class(Exception);
+  EXxmResponseHeaderInvalidName=class(Exception);
   EXxmResponseHeaderInvalidChar=class(Exception);
   EXxmResponseHeaderAlreadySent=class(Exception);
 
 const //resourcestring
   SXxmRequestHeadersReadOnly='Request headers are read-only.';
+  SXxmResponseHeaderInvalidName='Response header add: invalid header name.';
   SXxmResponseHeaderInvalidChar='Response header add: value contains invalid character.';
   SXxmResponseHeaderAlreadySent='Response header has already been sent.';
 
-procedure SplitHeader(const Value:AnsiString; var Params:TParamIndexes);
 function SplitHeaderValue(const Value:AnsiString;ValueStart,ValueLength:integer;
   var Params:TParamIndexes):AnsiString;
 function GetParamValue(const Data:AnsiString;
-  Params:TParamIndexes; const Name:AnsiString):AnsiString;
-procedure HeaderCheckName(const Name: WideString);
+  Params:TParamIndexes; const Name:WideString):AnsiString;
+
+procedure HeaderNameNext(HeaderNameChar:AnsiChar;var HeaderNameIndex:integer);
+function HeaderNameGet(const Name:WideString):integer;
+function HeaderNameSet(const Name:WideString):integer;
 procedure HeaderCheckValue(const Value: WideString);
+function KnownHeaderIndex(KnownHeader:TKnownHeaderName):integer;
 
 {$IF not Declared(UTF8ToWideString)}
 {$DEFINE NOT_DECLARED_UTF8ToWideString}
@@ -169,7 +191,7 @@ function UTF8ToWideString(const s: UTF8String): WideString;
 
 implementation
 
-uses Variants, xxmCommonUtils;
+uses Windows, Variants, xxmCommonUtils;
 
 { TControlledLifeTimeObject }
 
@@ -193,65 +215,32 @@ end;
 
 {  }
 
-procedure SplitHeader(const Value:AnsiString; var Params:TParamIndexes);
-var
-  b:boolean;
-  p,q,l,r,i,pl:integer;
-begin
-  q:=1;
-  i:=0;
-  pl:=0;
-  l:=Length(Value);
-  while (q<=l) do
-   begin
-    p:=q;
-    b:=false;
-    while (q<=l) and not(b and (Value[q]=#10)) do
-     begin
-      b:=Value[q]=#13;
-      inc(q);
-     end;
-    inc(q);
+const
+  HeaderNameMap:array[byte] of byte=(
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,48,00,49,50,51,52,53,00,54,55,00,00,20,56,00,
+    10,11,12,13,14,15,16,17,18,19,53,54,00,00,00,00,//0-9
+    00,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,//A-P
+    36,37,38,39,40,41,42,43,44,45,46,00,00,00,00,55,//Q-Z
+    00,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,//a-p
+    36,37,38,39,40,41,42,43,44,45,46,00,00,00,00,00,//q-z
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,
+    00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00);
 
-    if q-p<>2 then
-     begin
-      r:=p;
-      while (r<=q) and (Value[r] in [#1..#32]) do inc(r);
-      if r=p then
-       begin
-        if i=pl then
-         begin
-          inc(pl,$10);//grow
-          SetLength(Params,pl);
-         end;
-        Params[i].NameStart:=p;
-        r:=p;
-        while (r<=q) and (Value[r]<>':') do inc(r);
-        Params[i].NameLength:=r-p;
-        inc(r);
-        while (r<=q) and (Value[r] in [#1..#32]) do inc(r);
-        Params[i].ValueStart:=r;
-        Params[i].ValueLength:=q-r-2;//2 from Length(EOL)
-        inc(i);
-       end
-      else
-       begin
-        //assert i<>0
-        Params[i].ValueLength:=q-Params[i].ValueStart-2;
-        //TODO: kill EOF and whitespace?
-       end;
-     end;
-   end;
-  SetLength(Params,i);
-end;
 
 function SplitHeaderValue(const Value:AnsiString;
   ValueStart,ValueLength:integer;var Params:TParamIndexes):AnsiString;
 var
-  i,j,l,q,pl:integer;
+  i,j,l,n:integer;
 begin
-  q:=0;
-  pl:=0;
+  Params.ParsIndex:=0;
   l:=ValueStart+ValueLength-1;
   i:=ValueStart;//set to 0 to start parsing sub-values
   if i=0 then inc(l) else while (i<=l) and (Value[i]<>';') do inc(i);
@@ -260,68 +249,219 @@ begin
     if i=0 then Result:='' else Result:=Copy(Value,ValueStart,i-ValueStart);
     while i<=l do
      begin
-      if q=pl then
+      if Params.ParsIndex=Params.ParsSize then
        begin
-        inc(pl,$10);
-        SetLength(Params,pl);
+        inc(Params.ParsSize,$10);//growstep
+        SetLength(Params.Pars,Params.ParsSize);
        end;
       inc(i);
       while (i<=l) and (Value[i] in [#1..#32]) do inc(i);
-      Params[q].NameStart:=i;
+      Params.Pars[Params.ParsIndex].NameStart:=i;
       j:=i;
-      while (j<=l) and (Value[j]<>'=') do inc(j);
-      Params[q].NameLength:=j-i;
+      n:=0;
+      while (j<=l) and (Value[j]<>'=') and (HeaderNameMap[byte(Value[j])]<>0) do
+       begin
+        HeaderNameNext(Value[j],n);
+        inc(j);
+       end;
+      Params.Pars[Params.ParsIndex].NameLength:=j-i;
+      Params.Pars[Params.ParsIndex].NameIndex:=n;
       i:=j+1;
       if (i<=l) and (Value[i]='"') then
        begin
         //in quotes
         inc(i);
-        Params[q].ValueStart:=i;
+        Params.Pars[Params.ParsIndex].ValueStart:=i;
         j:=i;
         while (j<=l) and (Value[j]<>'"') do inc(j);
-        Params[q].ValueLength:=j-i;
+        Params.Pars[Params.ParsIndex].ValueLength:=j-i;
         while (j<=l) and (Value[j]<>';') do inc(j);//ignore
        end
       else
        begin
         //not in quotes
-        Params[q].ValueStart:=i;
+        Params.Pars[Params.ParsIndex].ValueStart:=i;
         j:=i;
         while (j<=l) and (Value[j]<>';') do inc(j);
-        Params[q].ValueLength:=j-i;
+        Params.Pars[Params.ParsIndex].ValueLength:=j-i;
        end;
       i:=j;
-      inc(q);
+      inc(Params.ParsIndex);
      end;
    end
   else
     Result:=Copy(Value,ValueStart,ValueLength);
-  SetLength(Params,q);
 end;
 
 function GetParamValue(const Data:AnsiString;
-  Params:TParamIndexes; const Name:AnsiString):AnsiString;
+  Params:TParamIndexes; const Name:WideString):AnsiString;
 var
+  n:integer;
   l,i:integer;
 begin
-  l:=Length(Params);
-  i:=0;
-  while (i<l) and (CompareText(string(
-    Copy(Data,Params[i].NameStart,Params[i].NameLength)),string(Name))<>0) do inc(i);
+  n:=HeaderNameGet(Name);
+  l:=Params.ParsIndex;
+  if n=0 then i:=l else i:=0;
+  while (i<l) and (Params.Pars[i].NameIndex<>n) do inc(i);
   if i<l then
-    Result:=Copy(Data,Params[i].ValueStart,Params[i].ValueLength)
+    Result:=Copy(Data,Params.Pars[i].ValueStart,Params.Pars[i].ValueLength)
   else
     Result:='';
 end;
 
-procedure HeaderCheckName(const Name: WideString);
+const
+  HeaderNameNodesGrowStep=$1000;
+  HeaderNamePreload:array[TKnownHeaderName] of AnsiString=(
+    'Content-Type','Content-Length','Content-Disposition',
+    'Connection','Transfer-Encoding','Cache-Control',
+    'Accept','Authorization','WWW-Authenticate','Upgrade',
+    'Server','Host','User-Agent','Referer','Location',
+    'Accept-Encoding','Accept-Language',
+    'If-Modified-Since','Last-Modified','Expires',
+    'Cookie','Set-Cookie');
+
+type
+  THeaderNameNode=array[0..64] of integer;
+
 var
-  i:integer;
+  HeaderNameSearchTree:record
+    Lock:TRTLCriticalSection;
+    Nodes:array of THeaderNameNode;
+    NodesIndex,NodesSize:integer;
+  end;
+  KnownHeaders:array[TKnownHeaderName] of integer;
+
+procedure HeaderNameNodes_Init;
+var
+  si,i:integer;
+  kh:TKnownHeaderName;
+  n:byte;
+  p:PInteger;
 begin
-  for i:=1 to Length(Name) do if AnsiChar(Name[i]) in [#0..' ',
-    '(',')','<','>','@',',',';',':','\','"','/',
-    '[',']','?','=','{','}',#127..#255] then
+  InitializeCriticalSection(HeaderNameSearchTree.Lock);
+  HeaderNameSearchTree.NodesIndex:=1;
+  HeaderNameSearchTree.NodesSize:=HeaderNameNodesGrowStep;
+  SetLength(HeaderNameSearchTree.Nodes,HeaderNameNodesGrowStep);
+  ZeroMemory(@HeaderNameSearchTree.Nodes[0],
+    HeaderNameNodesGrowStep*SizeOf(THeaderNameNode));
+  //pre-load
+  for kh:=Low(TKnownHeaderName) to High(TKnownHeaderName) do
+   begin
+    i:=0;
+    for si:=1 to Length(HeaderNamePreload[kh]) do
+     begin
+      n:=HeaderNameMap[byte(HeaderNamePreload[kh][si])];
+      //assert n<>0
+      p:=@HeaderNameSearchTree.Nodes[i][n];
+      if p^=0 then
+       begin
+        i:=HeaderNameSearchTree.NodesIndex;
+        //assert never i=HeaderNameSearchTree.NodesSize
+        //  since HeaderNameNodesGrowStep is selected to fit all of
+        //  HeaderNamePreload
+        {
+        if i=HeaderNameSearchTree.NodesSize then
+         begin
+          inc(HeaderNameSearchTree.NodesSize,HeaderNameNodesGrowStep);
+          SetLength(HeaderNameSearchTree.Nodes,HeaderNameNodesGrowStep);
+          ZeroMemory(@HeaderNameSearchTree.Nodes[i],
+            HeaderNameNodesGrowStep*SizeOf(THeaderNameNode));
+         end;
+        }
+        inc(HeaderNameSearchTree.NodesIndex);
+        p^:=i;
+       end
+      else
+        i:=p^;
+     end;
+    KnownHeaders[kh]:=i;
+   end;
+end;
+
+procedure HeaderNameNext(HeaderNameChar:AnsiChar;var HeaderNameIndex:integer);
+var
+  n:byte;
+  i:integer;
+  p:PInteger;
+begin
+  n:=HeaderNameMap[byte(HeaderNameChar)];
+  if n=0 then
     raise EXxmResponseHeaderInvalidChar.Create(SXxmResponseHeaderInvalidChar);
+
+  //assert HeaderNameIndex>=0 and HeaderNameIndex<HeaderNameSearchTree.NodesIndex
+
+  i:=HeaderNameSearchTree.Nodes[HeaderNameIndex][n];
+  if i=0 then
+   begin
+    EnterCriticalSection(HeaderNameSearchTree.Lock);
+    try
+      //check again in case another thread just did the same
+      p:=@HeaderNameSearchTree.Nodes[HeaderNameIndex][n];
+      if p^=0 then
+       begin
+        i:=HeaderNameSearchTree.NodesIndex;
+        if i=HeaderNameSearchTree.NodesSize then
+         begin
+          inc(HeaderNameSearchTree.NodesSize,HeaderNameNodesGrowStep);
+          SetLength(HeaderNameSearchTree.Nodes,HeaderNameNodesGrowStep);
+          ZeroMemory(@HeaderNameSearchTree.Nodes[i],
+            HeaderNameNodesGrowStep*SizeOf(THeaderNameNode));
+         end;
+        inc(HeaderNameSearchTree.NodesIndex);
+        p^:=i;
+       end;
+    finally
+      LeaveCriticalSection(HeaderNameSearchTree.Lock);
+    end;
+   end;
+  HeaderNameIndex:=i;
+end;
+
+function HeaderNameGet(const Name:WideString):integer;
+var
+  i,l:integer;
+  w:word;
+  n:byte;
+begin
+  Result:=0;
+  l:=Length(Name);
+  if l=0 then
+    raise EXxmResponseHeaderInvalidName.Create(SXxmResponseHeaderInvalidName)
+  else
+   begin
+    i:=1;
+    repeat
+      w:=word(Name[i]);
+      if (w and $FF80)=0 then n:=HeaderNameMap[byte(Name[i])] else n:=0;
+      inc(i);
+      if n=0 then
+        raise EXxmResponseHeaderInvalidChar.Create(SXxmResponseHeaderInvalidChar)//Result:=0
+      else
+        Result:=HeaderNameSearchTree.Nodes[Result][n];
+    until (Result=0) or (i>l);
+   end;
+end;
+
+function HeaderNameSet(const Name:WideString):integer;
+var
+  i,l:integer;
+begin
+  Result:=0;
+  l:=Length(Name);
+  if l=0 then
+    raise EXxmResponseHeaderInvalidName.Create(SXxmResponseHeaderInvalidName)
+  else
+   begin
+    i:=1;
+    while i<=l do
+     begin
+      if (word(Name[i]) and $FF80)=0 then
+        HeaderNameNext(AnsiChar(Name[i]),Result)
+      else
+        raise EXxmResponseHeaderInvalidChar.Create(SXxmResponseHeaderInvalidChar);
+      inc(i);
+     end;
+   end;
 end;
 
 procedure HeaderCheckValue(const Value: WideString);
@@ -330,7 +470,12 @@ var
 begin
   for i:=1 to Length(Value) do
     if AnsiChar(Value[i]) in [#0,#10,#13] then //more?
-      raise EXxmResponseHeaderInvalidChar.Create(SXxmResponseHeaderInvalidChar);
+
+end;
+
+function KnownHeaderIndex(KnownHeader:TKnownHeaderName):integer;
+begin
+  Result:=KnownHeaders[KnownHeader];
 end;
 
 {$IFDEF NOT_DECLARED_UTF8ToWideString}
@@ -342,8 +487,11 @@ end;
 
 { TStreamNozzle }
 
-constructor TStreamNozzle.Create(Source: TStream; DataProgressAgent,
-  FileProgressAgent: IxxmUploadProgressAgent; FileProgressStep: integer);
+constructor TStreamNozzle.Create(Source: TStream; const Boundary: AnsiString;
+  DataProgressAgent, FileProgressAgent: IxxmUploadProgressAgent;
+  FileProgressStep: integer);
+var
+  bl:integer;
 begin
   inherited Create;
   FSource:=Source;
@@ -354,16 +502,40 @@ begin
   FDataAgent:=DataProgressAgent;
   FFileAgent:=FileProgressAgent;
   ReportStep:=FileProgressStep;
+
+  //initialization, find first boundary
+  bl:=Length(Boundary);
+  if bl=0 then
+    raise Exception.Create('unable to get boundary from header for multipart/form-data');
+  Ensure(bl+5,'','');
+  if Copy(Data,3,bl)<>Boundary then
+    raise Exception.Create('multipart/form-data data does not start with boundary');
+  Index:=bl+3;
+  //TODO:detect EOL now?
+  SkipWhiteSpace;
+  FBoundary:=#13#10'--'+Boundary;
+  //Flush;?
 end;
 
 destructor TStreamNozzle.Destroy;
 begin
-  FDataAgent:=nil;
-  FFileAgent:=nil;
+  try
+    FDataAgent:=nil;
+  except
+    //silent
+    pointer(FDataAgent):=nil;
+  end;
+  try
+    FFileAgent:=nil;
+  except
+    //silent
+    pointer(FFileAgent):=nil;
+  end;
   inherited;
 end;
 
-function TStreamNozzle.Ensure(EnsureSize: integer):boolean;
+function TStreamNozzle.Ensure(EnsureSize: integer;
+  const FieldName, FileName: AnsiString):boolean;
 var
   i:integer;
 const
@@ -380,7 +552,12 @@ begin
       inc(Size,i);
       if i=0 then SourceAtEnd:=true;
       Result:=Index+EnsureSize<=Size;
-      if FDataAgent<>nil then FDataAgent.ReportProgress('','',Done+Size);
+      if FDataAgent<>nil then
+        try
+          FDataAgent.ReportProgress(FieldName,FileName,Done+Size);
+        except
+          pointer(FDataAgent):=nil;
+        end;
      end;
    end
   else
@@ -407,47 +584,27 @@ end;
 procedure TStreamNozzle.SkipWhiteSpace;
 begin
   //if '--' then multipart done?
-  while Ensure(1) and (Data[Index] in [#0..#31]) do inc(Index);
-end;
-
-procedure TStreamNozzle.CheckBoundary(var Boundary: AnsiString);
-var
-  bl:integer;
-begin
-  bl:=Length(Boundary);
-  Ensure(bl+5);
-  //assert Index=1;
-  if Copy(Data,3,bl)<>Boundary then
-    raise Exception.Create('Multipart data does not start with boundary');
-  Index:=bl+3;
-  //TODO:detect EOL now?
-  SkipWhiteSpace;
-  Boundary:=#13#10'--'+Boundary;
-  //Flush;?
+  while Ensure(1,'','') and (Data[Index] in [#0..#31]) do inc(Index);
 end;
 
 function TStreamNozzle.GetHeader(var Params: TParamIndexes): AnsiString;
-const
-  sGrowStep=$1000;
-  pGrowStep=$10;
 var
   b:boolean;
-  p,q,r,s,i,l:integer;
+  p,q,r,s,n:integer;
 begin
   p:=0;
   q:=1;
-  i:=0;
-  l:=0;
+  Params.ParsIndex:=0;
   s:=0;
-  while Ensure(1) and (q-p<>2) do //2 being Length(EOL)
+  while Ensure(1,'','') and (q-p<>2) do //2 being Length(EOL)
    begin
     p:=q;
     b:=false;
-    while Ensure(1) and not(b and (Data[Index]=#10)) do
+    while Ensure(1,'','') and not(b and (Data[Index]=#10)) do
      begin
       if q>s then
        begin
-        inc(s,sGrowStep);
+        inc(s,$1000);//grow step
         SetLength(Result,s);
        end;
       Result[q]:=Data[Index];
@@ -455,44 +612,49 @@ begin
       inc(Index);
       inc(q);
      end;
-    Result[q]:=Data[Index];
+    Result[q]:=Data[Index];//#10
     inc(Index);
     inc(q);
 
     if q-p<>2 then
      begin
-      if i=l then
+      if Params.ParsIndex=Params.ParsSize then
        begin
-        inc(l,pGrowStep);
-        SetLength(Params,l);
+        inc(Params.ParsSize,$10);//grow step
+        SetLength(Params.Pars,Params.ParsSize);
        end;
-      Params[i].NameStart:=p;
+      Params.Pars[Params.ParsIndex].NameStart:=p;
       r:=p;
-      while (r<=q) and (Result[r]<>':') do inc(r);
-      Params[i].NameLength:=r-p;
+      n:=0;
+      while (r<=q) and (Result[r]<>':') do
+       begin
+        HeaderNameNext(Result[r],n);
+        inc(r);
+       end;
+      Params.Pars[Params.ParsIndex].NameLength:=r-p;
+      Params.Pars[Params.ParsIndex].NameIndex:=n;
       inc(r);
       while (r<=q) and (Result[r] in [#1..#32]) do inc(r);
-      Params[i].ValueStart:=r;
-      Params[i].ValueLength:=q-r-2;//2 from Length(EOL)
-      inc(i);
+      Params.Pars[Params.ParsIndex].ValueStart:=r;
+      Params.Pars[Params.ParsIndex].ValueLength:=q-r-2;//2 from Length(EOL)
+      inc(Params.ParsIndex);
      end;
    end;
-  SetLength(Params,i);
   SetLength(Result,q-1);
   Flush;
 end;
 
-function TStreamNozzle.GetString(const Boundary: AnsiString): AnsiString;
+function TStreamNozzle.GetString: AnsiString;
 var
   l,p,q:integer;
 begin
-  l:=Length(Boundary);
+  l:=Length(FBoundary);
   p:=0;
   q:=Index;
-  while Ensure(l) and (p<>l) do
+  while Ensure(l,'','') and (p<>l) do
    begin
     p:=0;
-    while (p<l) and (Data[p+Index]=Boundary[p+1]) do inc(p);
+    while (p<l) and (Data[p+Index]=FBoundary[p+1]) do inc(p);
     if p<>l then inc(Index);
    end;
   SetLength(Result,Index-q);
@@ -502,22 +664,22 @@ begin
   Flush;
 end;
 
-procedure TStreamNozzle.GetData(const Boundary, FieldName, FileName: AnsiString;
+procedure TStreamNozzle.GetData(const FieldName, FileName: AnsiString;
   var Pos: integer; var Len: integer);
 var
   l,p,x,s:integer;
 begin
   Pos:=Done+Index-1;
-  l:=Length(Boundary);
+  l:=Length(FBoundary);
   p:=0;
   if (ReportStep=0) or (FFileAgent=nil) then
    begin
     //short loop
-    while Ensure(l) and (p<>l) do
+    while Ensure(l,FieldName,FileName) and (p<>l) do
      begin
       Flush;//depends on flush threshold
       p:=0;
-      while (p<l) and (Data[p+Index]=Boundary[p+1]) do inc(p);
+      while (p<l) and (Data[p+Index]=FBoundary[p+1]) do inc(p);
       if p<>l then inc(Index);
      end;
    end
@@ -526,11 +688,11 @@ begin
     //full loop
     x:=ReportStep;
     s:=0;
-    while Ensure(l) and (p<>l) do
+    while Ensure(l,FieldName,FileName) and (p<>l) do
      begin
       Flush;//depends on flush threshold
       p:=0;
-      while (p<l) and (Data[p+Index]=Boundary[p+1]) do inc(p);
+      while (p<l) and (Data[p+Index]=FBoundary[p+1]) do inc(p);
       if p<>l then
        begin
         inc(Index);
@@ -538,14 +700,22 @@ begin
         dec(x);
         if x=0 then
          begin
-          FFileAgent.ReportProgress(FieldName,FileName,s);
+          if FFileAgent<>nil then
+            try
+              FFileAgent.ReportProgress(FieldName,FileName,s);
+            except
+              pointer(FFileAgent):=nil;
+            end;
           x:=ReportStep;
-         end
-        else
-          inc(x);
+         end;
        end;
-      FFileAgent.ReportProgress(FieldName,FileName,s);
      end;
+    if FFileAgent<>nil then
+      try
+        FFileAgent.ReportProgress(FieldName,FileName,s);
+      except
+        pointer(FFileAgent):=nil;
+      end;
    end;
   Len:=Done+Index-(Pos+1);
   //skip boundary
@@ -557,7 +727,7 @@ end;
 function TStreamNozzle.MultiPartDone: boolean;
 begin
   //assert just matched boundary
-  Result:=not(Ensure(2)) or ((Data[Index]='-') and (Data[Index+1]='-'));
+  Result:=not(Ensure(2,'','')) or ((Data[Index]='-') and (Data[Index+1]='-'));
 end;
 
 { TRequestHeaders }
@@ -565,7 +735,9 @@ end;
 constructor TRequestHeaders.Create;
 begin
   inherited Create;
-  FData:='';//Reset;
+  Data:='';
+  FIdx.ParsIndex:=0;
+  FIdx.ParsSize:=0;
 end;
 
 destructor TRequestHeaders.Destroy;
@@ -574,21 +746,77 @@ begin
   inherited;
 end;
 
-procedure TRequestHeaders.Load(const Data: AnsiString);
+procedure TRequestHeaders.Load(StartIndex,DataLength:integer);
+var
+  b:boolean;
+  p,q,l,r,n:integer;
 begin
-  FData:=Data;
-  SplitHeader(FData,FIdx);
+  //caller load data into public Data:AnsiString;
+  q:=StartIndex;//assert >0
+  FIdx.ParsIndex:=0;
+  //assert Length(FData)>=DataLength;
+  l:=DataLength;
+  while (q<=l) do
+   begin
+    p:=q;
+    b:=false;
+    while (q<=l) and not(b and (Data[q]=#10)) do
+     begin
+      b:=Data[q]=#13;
+      inc(q);
+     end;
+    inc(q);
+    if q-p=2 then
+     begin
+      //<CR><LF><CR><LF> ends header (except <CR><LF> at StartIndex)
+      if p<>StartIndex then q:=l+1;
+     end
+    else
+     begin
+      r:=p;
+      while (r<=q) and (Data[r] in [#1..#32]) do inc(r);
+      if r=p then
+       begin
+        if FIdx.ParsIndex=FIdx.ParsSize then
+         begin
+          inc(FIdx.ParsSize,$10);//grow
+          SetLength(FIdx.Pars,FIdx.ParsSize);
+         end;
+        FIdx.Pars[FIdx.ParsIndex].NameStart:=p;
+        r:=p;
+        n:=0;
+        while (r<=q) and (Data[r]<>':') do
+         begin
+          HeaderNameNext(Data[r],n);
+          inc(r);
+         end;
+        FIdx.Pars[FIdx.ParsIndex].NameLength:=r-p;
+        FIdx.Pars[FIdx.ParsIndex].NameIndex:=n;
+        inc(r);//':'
+        while (r<=q) and (Data[r] in [#1..#32]) do inc(r);
+        FIdx.Pars[FIdx.ParsIndex].ValueStart:=r;
+        FIdx.Pars[FIdx.ParsIndex].ValueLength:=q-r-2;//2 from Length(EOL)
+        inc(FIdx.ParsIndex);
+       end
+      else
+       begin
+        //assert i<>0
+        FIdx.Pars[FIdx.ParsIndex].ValueLength:=q-FIdx.Pars[FIdx.ParsIndex].ValueStart-2;
+        //TODO: kill EOF and whitespace?
+       end;
+     end;
+   end;
 end;
 
 procedure TRequestHeaders.Reset;
 begin
-  SetLength(FIdx,0);
-  FData:='';
+  FIdx.ParsIndex:=0;
+  //re-use Data, see Load
 end;
 
 function TRequestHeaders.GetCount: integer;
 begin
-  Result:=Length(FIdx);
+  Result:=FIdx.ParsIndex;
 end;
 
 function TRequestHeaders.GetItem(Name: OleVariant): WideString;
@@ -598,31 +826,30 @@ begin
   if VarIsNumeric(Name) then
    begin
     i:=integer(Name);
-    if (i>=0) and (i<Length(FIdx)) then
-      Result:=WideString(Copy(FData,FIdx[i].ValueStart,FIdx[i].ValueLength))
+    if (i>=0) and (i<FIdx.ParsIndex) then
+      Result:=WideString(Copy(Data,FIdx.Pars[i].ValueStart,FIdx.Pars[i].ValueLength))
     else
       raise ERangeError.Create('TRequestHeaders.GetItem: Out of range');
    end
   else
-    Result:=WideString(GetParamValue(FData,FIdx,AnsiString(Name)));
+    Result:=WideString(GetParamValue(Data,FIdx,Name));
 end;
 
 function TRequestHeaders.Complex(Name: OleVariant;
   out Items: IxxmDictionary): WideString;
 var
-  l,i:integer;
+  n,i:integer;
   sv:TRequestSubValues;
 begin
-  l:=Length(FIdx);
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
-    i:=0;
-    while (i<l) and (CompareText(string(Copy(
-      FData,FIdx[i].NameStart,FIdx[i].NameLength)),string(Name))<>0) do inc(i);//lower?
+    n:=HeaderNameGet(Name);
+    if n=0 then i:=FIdx.ParsIndex else i:=0;
+    while (i<FIdx.ParsIndex) and (FIdx.Pars[i].NameIndex<>n) do inc(i);
    end;
-  if (i>=0) and (i<l) then
-    sv:=TRequestSubValues.Create(WideString(FData),
-      FIdx[i].ValueStart,FIdx[i].ValueLength,Result)
+  if (i>=0) and (i<FIdx.ParsIndex) then
+    sv:=TRequestSubValues.Create(Data,
+      FIdx.Pars[i].ValueStart,FIdx.Pars[i].ValueLength,Result)
   else
     sv:=TRequestSubValues.Create('',1,0,Result);//raise?
   if @Items=nil then sv.Free else Items:=sv;
@@ -635,10 +862,23 @@ end;
 
 function TRequestHeaders.GetName(Idx: integer): WideString;
 begin
-  if (Idx>=0) and (Idx<Length(FIdx)) then
-    Result:=WideString(Copy(FData,FIdx[Idx].NameStart,FIdx[Idx].NameLength))
+  if (Idx>=0) and (Idx<FIdx.ParsIndex) then
+    Result:=WideString(Copy(Data,FIdx.Pars[Idx].NameStart,FIdx.Pars[Idx].NameLength))
   else
     raise ERangeError.Create('TRequestHeaders.GetName: Out of range');
+end;
+
+function TRequestHeaders.KnownHeader(Header:TKnownHeaderName):AnsiString;
+var
+  n,i:integer;
+begin
+  n:=KnownHeaders[Header];
+  i:=0;
+  while (i<FIdx.ParsIndex) and (FIdx.Pars[i].NameIndex<>n) do inc(i);
+  if i<FIdx.ParsIndex then
+    Result:=Copy(Data,FIdx.Pars[i].ValueStart,FIdx.Pars[i].ValueLength)
+  else
+    Result:='';
 end;
 
 procedure TRequestHeaders.SetName(Idx: integer; Value: WideString);
@@ -648,46 +888,49 @@ end;
 
 { TRequestSubValues }
 
-constructor TRequestSubValues.Create(const Data: WideString; ValueStart,
+constructor TRequestSubValues.Create(const Data: AnsiString; ValueStart,
   ValueLength: integer; var FirstValue: WideString);
 begin
   inherited Create;
   FData:=Data;//assert reference counting, full copy is senseless
+  FIdx.ParsIndex:=0;
+  FIdx.ParsSize:=0;
   FirstValue:=WideString(SplitHeaderValue(AnsiString(FData),ValueStart,ValueLength,FIdx));
 end;
 
 destructor TRequestSubValues.Destroy;
 begin
-  SetLength(FIdx,0);
+  SetLength(FIdx.Pars,0);
   FData:='';
   inherited;
 end;
 
 function TRequestSubValues.GetCount: integer;
 begin
-  Result:=Length(FIdx);
+  Result:=FIdx.ParsIndex;
 end;
 
 function TRequestSubValues.GetItem(Name: OleVariant): WideString;
 var
   i:integer;
 begin
+  //TODO: UTF8ToWideString?
   if VarIsNumeric(Name) then
    begin
     i:=integer(Name);
-    if (i>=0) and (i<Length(FIdx)) then
-      Result:=Copy(FData,FIdx[i].ValueStart,FIdx[i].ValueLength)
+    if (i>=0) and (i<FIdx.ParsIndex) then
+      Result:=WideString(Copy(FData,FIdx.Pars[i].ValueStart,FIdx.Pars[i].ValueLength))
     else
       raise ERangeError.Create('TRequestSubValues.GetItem: Out of range');
    end
   else
-    Result:=WideString(GetParamValue(AnsiString(FData),FIdx,AnsiString(VarToStr(Name))));
+    Result:=WideString(GetParamValue(FData,FIdx,Name));
 end;
 
 function TRequestSubValues.GetName(Idx: integer): WideString;
 begin
-  if (Idx>=0) and (Idx<Length(FIdx)) then
-    Result:=Copy(FData,FIdx[Idx].NameStart,FIdx[Idx].NameLength)
+  if (Idx>=0) and (Idx<FIdx.ParsIndex) then
+    Result:=WideString(Copy(FData,FIdx.Pars[Idx].NameStart,FIdx.Pars[Idx].NameLength))
   else
     raise ERangeError.Create('TRequestSubValues.GetName: Out of range');
 end;
@@ -752,32 +995,34 @@ end;
 
 function TResponseHeaders.GetItem(Name: OleVariant): WideString;
 var
-  i:integer;
+  n,i:integer;
 begin
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
-    i:=0;
-    while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+    n:=HeaderNameGet(Name);
+    if n=0 then i:=FItemsCount else i:=0;
+    while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
    end;
   if (i>=0) and (i<FItemsCount) then Result:=FItems[i].Value else Result:='';
 end;
 
 procedure TResponseHeaders.SetItem(Name: OleVariant; const Value: WideString);
 var
-  i:integer;
+  n,i:integer;
 begin
   if FBuilt then
     raise EXxmResponseHeaderAlreadySent.Create(SXxmResponseHeaderAlreadySent);
   //TODO: add sorted, query with minimax
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
+    n:=HeaderNameSet(Name);
     i:=0;
-    while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+    while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
     if i=FItemsCount then
      begin
-      HeaderCheckName(VarToWideStr(Name));
       Grow;
       FItems[i].Name:=Name;
+      FItems[i].NameIndex:=n;
       FItems[i].SubValues:=nil;
      end;
    end;
@@ -791,17 +1036,18 @@ end;
 function TResponseHeaders.Complex(Name: OleVariant;
   out Items: IxxmDictionary): WideString;
 var
-  i:integer;
+  n,i:integer;
 begin
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
+    n:=HeaderNameSet(Name);
     i:=0;
-    while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+    while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
     if i=FItemsCount then
      begin
-      HeaderCheckName(VarToWideStr(Name));
       Grow;
       FItems[i].Name:=Name;
+      FItems[i].NameIndex:=n;
       FItems[i].Value:='';
       FItems[i].SubValues:=nil;
      end;
@@ -843,29 +1089,31 @@ end;
 
 procedure TResponseHeaders.Add(const Name, Value: WideString);
 var
-  i:integer;
+  n,i:integer;
 begin
-  HeaderCheckName(Name);
+  n:=HeaderNameSet(Name);
   HeaderCheckValue(Value);
   i:=FItemsCount;
   Grow;
   FItems[i].Name:=Name;
-  FItems[i].SubValues:=nil;
+  FItems[i].NameIndex:=n;
   FItems[i].Value:=Value;
+  FItems[i].SubValues:=nil;
 end;
 
 function TResponseHeaders.SetComplex(const Name,
   Value: WideString): TResponseSubValues;
 var
-  i:integer;
+  n,i:integer;
 begin
+  n:=HeaderNameSet(Name);
   i:=0;
-  while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+  while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
   if i=FItemsCount then
    begin
-    HeaderCheckName(Name);
     Grow;
     FItems[i].Name:=Name;
+    FItems[i].NameIndex:=n;
     FItems[i].SubValues:=nil;
    end;
   HeaderCheckValue(Value);
@@ -883,11 +1131,12 @@ end;
 
 procedure TResponseHeaders.Remove(const Name: WideString);
 var
-  i,l:integer;
+  n,i,l:integer;
 begin
-  i:=0;
+  n:=HeaderNameGet(Name);
   l:=FItemsCount;
-  while (i<l) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+  if n=0 then i:=l else i:=0;
+  while (i<l) and (FItems[i].NameIndex<>n) do inc(i);
   if i<l then
    begin
     if FItems[i].SubValues<>nil then FItems[i].SubValues.Free;
@@ -911,12 +1160,17 @@ begin
 end;
 
 procedure TResponseHeaders.SetName(Idx: integer; Value: WideString);
+var
+  n:integer;
 begin
   if FBuilt then
     raise EXxmResponseHeaderAlreadySent.Create(SXxmResponseHeaderAlreadySent);
-  HeaderCheckName(Value);
+  n:=HeaderNameSet(Value);
   if (Idx>=0) and (Idx<Length(FItems)) then
-    FItems[Idx].Name:=Value
+   begin
+    FItems[Idx].Name:=Value;
+    FItems[Idx].NameIndex:=n;
+   end
   else
     raise ERangeError.Create('TResponseHeaders.SetName: Out of range');
 end;
@@ -961,32 +1215,34 @@ end;
 
 function TResponseSubValues.GetItem(Name: OleVariant): WideString;
 var
-  i:integer;
+  n,i:integer;
 begin
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
-    i:=0;
-    while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+    n:=HeaderNameGet(Name);
+    if n=0 then i:=FItemsCount else i:=0;
+    while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
    end;
   if (i>=0) and (i<FItemsCount) then Result:=FItems[i].Value else Result:='';
 end;
 
 procedure TResponseSubValues.SetItem(Name: OleVariant; const Value: WideString);
 var
-  i:integer;
+  n,i:integer;
 begin
   if FBuilt then
     raise EXxmResponseHeaderAlreadySent.Create(SXxmResponseHeaderAlreadySent);
   HeaderCheckValue(Value);
   if VarIsNumeric(Name) then i:=integer(Name) else
    begin
+    n:=HeaderNameSet(Name);
     i:=0;
-    while (i<FItemsCount) and (CompareText(FItems[i].Name,Name)<>0) do inc(i);
+    while (i<FItemsCount) and (FItems[i].NameIndex<>n) do inc(i);
     if i=FItemsCount then
      begin
-      HeaderCheckName(VarToWideStr(Name));
       Grow;
       FItems[i].Name:=Name;
+      FItems[i].NameIndex:=n;
      end;
    end;
   if (i>=0) and (i<FItemsCount) then
@@ -1019,14 +1275,21 @@ begin
 end;
 
 procedure TResponseSubValues.SetName(Idx: integer; Value: WideString);
+var
+  n:integer;
 begin
   if FBuilt then
     raise EXxmResponseHeaderAlreadySent.Create(SXxmResponseHeaderAlreadySent);
-  HeaderCheckName(Value);
+  n:=HeaderNameSet(Value);
   if (Idx>=0) and (Idx<Length(FItems)) then
-    FItems[Idx].Name:=Value
+   begin
+    FItems[Idx].Name:=Value;
+    FItems[Idx].NameIndex:=n;
+   end
   else
     raise ERangeError.Create('TResponseSubValues.SetName: Out of range');
 end;
 
+initialization
+  HeaderNameNodes_Init;
 end.

@@ -50,8 +50,7 @@ type
 
 implementation
 
-uses Variants, ComObj, xxmUtilities, xxmProtoParse, xxmCommonUtils,
-  xxmConvertXML, MSXML2_TLB;
+uses Variants, ComObj, xxmUtilities, xxmProtoParse, xxmCommonUtils;
 
 {  }
 
@@ -174,23 +173,6 @@ begin
   finally
     f.Free;
   end;
-
-  //TRANSITIONAL: convert
-  if (s<>'') and (s[1]='<') then
-   begin
-    s:=AnsiString(ConvertProjectFile(string(s)));
-    //CopyFile(,'.bak')?
-    if not(CopyFile(PChar(FRootFolder+DataFileName),PChar(FRootFolder+
-      StringReplace(DataFileName,'.','_',[rfReplaceAll])+'.bak'),false)) then
-      RaiseLastOSError;
-    f:=TFileStream.Create(FRootFolder+DataFileName,fmCreate);
-    try
-      f.Write(s[1],Length(s));
-    finally
-      f.Free;
-    end;
-
-   end;
 
   Data:=JSON;
   Data.Parse(WideString(s));
@@ -679,7 +661,7 @@ begin
        begin
         v1:=VarArrayLowBound(v,1);
         v2:=VarArrayHighBound(v,1);
-        while v1<v2 do
+        while v1<=v2 do
          begin
           s.WriteString(VarToStr(v[v1]));
           inc(v1);
@@ -726,7 +708,7 @@ var
        begin
         v1:=VarArrayLowBound(v,1);
         v2:=VarArrayHighBound(v,1);
-        while v1<v2 do
+        while v1<=v2 do
          begin
           vx:=v[v1];
           if VarIsArray(vx) then
@@ -736,7 +718,7 @@ var
            end
           else
             cl.Add(prefix+VarToStr(vx));
-          inc(v2);
+          inc(v1);
          end;
        end
       else

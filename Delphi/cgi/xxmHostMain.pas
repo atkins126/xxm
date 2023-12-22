@@ -4,7 +4,7 @@ interface
 
 uses
   Windows, SysUtils, ActiveX, xxm, Classes, xxmContext, xxmThreadPool,
-  xxmPReg, xxmPRegJson, xxmParams, xxmParUtils, xxmHeaders;
+  xxmPReg, xxmParams, xxmParUtils, xxmHeaders;
 
 type
   TXxmPostDataStream=class(TCustomMemoryStream)
@@ -31,7 +31,7 @@ type
     FReqHeaders:TRequestHeaders;
     FResHeaders:TResponseHeaders;
     FConnected:boolean;
-    FURI,FRedirectPrefix,FSessionID:WideString;
+    FURI,FRedirectPrefix:WideString;
     FCookieParsed: boolean;
     FCookie: AnsiString;
     FCookieIdx: TParamIndexes;
@@ -43,15 +43,12 @@ type
     procedure EndRequest; override;
 
     function SendData(const Buffer; Count: LongInt): LongInt;
-    procedure DispositionAttach(const FileName: WideString); override;
     function ContextString(cs:TXxmContextString):WideString; override;
     procedure Redirect(const RedirectURL:WideString; Relative:boolean); override;
     function Connected:boolean; override;
-    function GetSessionID:WideString; override;
     procedure SendHeader; override;
     function GetCookie(const Name:WideString):WideString; override;
 
-    function GetProjectEntry:TXxmProjectEntry; override;
     function GetRequestHeader(const Name: WideString): WideString; override;
     procedure AddResponseHeader(const Name, Value: WideString); override;
     function GetRawSocket: IStream; override;
@@ -70,6 +67,7 @@ type
   {$IF not(Declared(FixedUInt))}
   FixedUInt=LongInt;
   PFixedUInt=PLongInt;
+  LargeInt=Int64;
   LargeUInt=LargeInt;
   XDWORD=Longint;
   {$ELSE}
@@ -83,7 +81,7 @@ type
     constructor Create(PipeIn,PipeOut:THandle);
     destructor Destroy; override;
     { IStream }
-    function Seek(dlibMove: Largeint; dwOrigin: XDWORD;
+    function Seek(dlibMove: LargeInt; dwOrigin: XDWORD;
       out libNewPosition: LargeUInt): HResult; stdcall;
     function SetSize(libNewSize: LargeUInt): HResult; stdcall;
     function CopyTo(stm: IStream; cb: LargeUInt; out cbRead: LargeUInt;
@@ -154,7 +152,6 @@ begin
   FConnected:=true;
   FCookieParsed:=false;
   FQueryStringIndex:=1;
-  FSessionID:='';//see GetSessionID
   FRedirectPrefix:='';
   FReqHeaders.Reset;
   FResHeaders.Reset;
@@ -215,13 +212,14 @@ begin
      end;
     y:=y+#13#10;
 
-    FReqHeaders.Load(y);
+    FReqHeaders.Data:=y;
+    FReqHeaders.Load(1,Length(y));
 
     x:=GetCGIValue('SERVER_PROTOCOL');//http or https
     i:=1;
     l:=Length(x);
     while (i<=l) and (x[i]<>'/') do inc(i);
-    y:=UTF8Encode(FReqHeaders['Host']);
+    y:=FReqHeaders.KnownHeader(khHost);
     if y='' then y:='localhost';//if not port=80 then +':'+?
     FRedirectPrefix:=LowerCase(string(Copy(x,1,i-1)))+'://'+UTF8ToWideString(y);
 
@@ -281,11 +279,6 @@ begin
   end;
 end;
 
-function TXxmHostedContext.GetProjectEntry: TXxmProjectEntry;
-begin
-  Result:=XxmProjectCache.GetProject(FProjectName);
-end;
-
 function TXxmHostedContext.Connected: boolean;
 begin
   Result:=FConnected;
@@ -299,16 +292,16 @@ begin
     csExtraInfo:Result:='';//???
     csVerb:Result:=string(GetCGIValue('REQUEST_METHOD'));
     csQueryString:Result:=Copy(FURI,FQueryStringIndex,Length(FURI)-FQueryStringIndex+1);
-    csUserAgent:Result:=FReqHeaders['User-Agent'];
-    csAcceptedMimeTypes:Result:=FReqHeaders['Accept'];//TODO:
-    csPostMimeType:Result:=string(GetCGIValue('CONTENT_TYPE'));//TODO:
+    csUserAgent:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khUserAgent));
+    csAcceptedMimeTypes:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khAccept));
+    csPostMimeType:Result:=UTF8ToWideString(GetCGIValue('CONTENT_TYPE'));
     csURL:Result:=GetURL;
     csProjectName:Result:=FProjectName;
     csLocalURL:Result:=FFragmentName;
-    csReferer:Result:=FReqHeaders['Referer'];
-    csLanguage:Result:=FReqHeaders['Accept-Language'];
-    csRemoteAddress:Result:=string(GetCGIValue('REMOTE_ADDR'));
-    csRemoteHost:Result:=string(GetCGIValue('REMOTE_HOST'));
+    csReferer:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khReferer));
+    csLanguage:Result:=UTF8ToWideString(FReqHeaders.KnownHeader(khAcceptLanguage));
+    csRemoteAddress:Result:=UTF8ToWideString(GetCGIValue('REMOTE_ADDR'));
+    csRemoteHost:Result:=UTF8ToWideString(GetCGIValue('REMOTE_HOST'));
     csAuthUser,csAuthPassword:Result:=UTF8ToWideString(AuthValue(cs));
     else
       raise EXxmContextStringUnknown.Create(StringReplace(
@@ -316,43 +309,15 @@ begin
   end;
 end;
 
-procedure TXxmHostedContext.DispositionAttach(const FileName: WideString);
-var
-  s:WideString;
-  i:integer;
-begin
-  s:=FileName;
-  for i:=1 to Length(s) do
-    if AnsiChar(s[i]) in ['\','/',':','*','?','"','<','>','|'] then
-      s[i]:='_';
-  FResHeaders.SetComplex('Content-disposition','attachment')['filename']:=s;
-end;
-
 function TXxmHostedContext.GetCookie(const Name: WideString): WideString;
 begin
   if not(FCookieParsed) then
    begin
-    FCookie:=UTF8Encode(FReqHeaders['Cookie']);
+    FCookie:=UTF8Encode(FReqHeaders.KnownHeader(khCookie));
     SplitHeaderValue(FCookie,0,Length(FCookie),FCookieIdx);
     FCookieParsed:=true;
    end;
-  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,UTF8Encode(Name)));
-end;
-
-function TXxmHostedContext.GetSessionID: WideString;
-const
-  SessionCookie='xxmSessionID';
-begin
-  if FSessionID='' then
-   begin
-    FSessionID:=GetCookie(SessionCookie);
-    if FSessionID='' then
-     begin
-      FSessionID:=Copy(CreateClassID,2,32);
-      SetCookie(SessionCookie,FSessionID);//expiry?
-     end;
-   end;
-  Result:=FSessionID;
+  Result:=UTF8ToWideString(GetParamValue(FCookie,FCookieIdx,Name));
 end;
 
 procedure TXxmHostedContext.Redirect(const RedirectURL: WideString;
@@ -454,7 +419,7 @@ end;
 
 function TXxmHostedContext.GetRawSocket: IStream;
 begin
-  if FReqHeaders['Upgrade']='' then Result:=nil else
+  if FReqHeaders.KnownHeader(khUpgrade)='' then Result:=nil else
    begin
     FContentType:='';
     CheckSendStart(false);
@@ -561,7 +526,7 @@ begin
   raise Exception.Create('TRawSocketData.Revert not supported');
 end;
 
-function TRawSocketData.Seek(dlibMove: Largeint; dwOrigin: XDWORD;
+function TRawSocketData.Seek(dlibMove: LargeInt; dwOrigin: XDWORD;
   out libNewPosition: LargeUInt): HResult;
 begin
   raise Exception.Create('TRawSocketData.Seek not supported');

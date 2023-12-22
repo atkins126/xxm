@@ -21,10 +21,8 @@ type
     Label1: TLabel;
     txtProjectName: TEdit;
     Label2: TLabel;
-    txtCompileCommand: TEdit;
     tvFiles: TTreeView;
     Open1: TMenuItem;
-    btnRegisterLocal: TButton;
     ImageList1: TImageList;
     PopupMenu1: TPopupMenu;
     ActionList1: TActionList;
@@ -54,6 +52,11 @@ type
     txtParserValue: TMemo;
     Label3: TLabel;
     Label4: TLabel;
+    txtPreCompCmds: TMemo;
+    Label5: TLabel;
+    txtCompCmds: TMemo;
+    Label6: TLabel;
+    txtPostCompCmds: TMemo;
     procedure Exit1Click(Sender: TObject);
     procedure txtChange(Sender: TObject);
     procedure tvFilesCreateNodeClass(Sender: TCustomTreeView;
@@ -61,7 +64,6 @@ type
     procedure New1Click(Sender: TObject);
     procedure Save1Click(Sender: TObject);
     procedure Open1Click(Sender: TObject);
-    procedure btnRegisterLocalClick(Sender: TObject);
     procedure tvFilesExpanding(Sender: TObject; Node: TTreeNode;
       var AllowExpansion: Boolean);
     procedure tvFilesCompare(Sender: TObject; Node1, Node2: TTreeNode;
@@ -110,8 +112,7 @@ var
 
 implementation
 
-uses DateUtils, xxmUtilities, Registry, ShellAPI, ComObj, xxmConvertXML,
-  xxmConvert2;
+uses DateUtils, xxmUtilities, Registry, ShellAPI, ComObj;
 
 {$R *.dfm}
 
@@ -162,9 +163,33 @@ function TEditProjectMainForm.LoadProject(const Path: string;
   CreateNew: boolean): boolean;
 var
   f:TFileStream;
-  fn,fd:string;
+  fn:string;
+  fu:UTF8String;
+  fd:WideString;
   fe:boolean;
   i,j:integer;
+
+  procedure LoadMemo(const key: WideString; m: TMemo);
+  var
+    v:Variant;
+    i:integer;
+  begin
+    v:=ProjectData[key];
+    m.Lines.BeginUpdate;
+    try
+      if VarIsArray(v) then
+       begin
+        m.Lines.Clear;
+        for i:=VarArrayLowBound(v,1) to VarArrayHighBound(v,1) do
+          m.Lines.Add(VarToStr(v[i]));
+       end
+      else
+        m.Text:=VarToStr(v);
+    finally
+      m.Lines.EndUpdate;
+    end;
+  end;
+
 begin
   //assert CheckModified called before
 
@@ -193,16 +218,19 @@ begin
 
       f:=TFileStream.Create(fn,fmOpenRead or fmShareDenyWrite);
       try
-        //TODO: support UTF8,UTF16
         i:=f.Size;
-        SetLength(fd,i);
-        f.Read(fd[1],i);
+        SetLength(fu,i);
+        if i<>f.Read(fu[1],i) then RaiseLastOSError;
+        if (i>=3) and (fu[1]=#$EF) and (fu[2]=#$BB) and (fu[3]=#$BF) then
+            fd:=UTF8ToWideString(Copy(fu,4,i-3))
+        else
+          if (i>=2) and (fu[1]=#$FF) and (fu[2]=#$FE) then
+              fd:=PWideChar(@fu[1])
+          else
+              fd:=WideString(fu);
       finally
         f.Free;
       end;
-
-      //TRANSITIONAL
-      if (i<>0) and (fd[1]='<') then fd:=ConvertProjectFile(fd);
 
       ProjectData.Parse(fd);
      end
@@ -213,7 +241,7 @@ begin
       i:=j-1;
       while (i>0) and (fn[i]<>PathDelim) do dec(i);
       ProjectData['name']:=Copy(fn,i+1,j-i-1);
-      ProjectData['compileCommand']:='dcc32 -U[[HandlerPath]]public -Q [[ProjectName]].dpr';
+      ProjectData['compileCommand']:='dcc32 "-U[[HandlerPath]]public" -Q "[[ProjectName]].dpr"';
       ProjectData['files']:=JSON;
       ProjectData['units']:=JSON;
       ProjectData['resources']:=JSON;
@@ -224,7 +252,9 @@ begin
     Application.Title:='xxm Project - '+fn;
 
     txtProjectName.Text:=VarToStr(ProjectData['name']);
-    txtCompileCommand.Text:=VarToStr(ProjectData['compileCommand']);//TODO: support array of strings
+    LoadMemo('preCompileCommand',txtPreCompCmds);
+    LoadMemo('compileCommand',txtCompCmds);
+    LoadMemo('postCompileCommand',txtPostCompCmds);
     LastParserValue:=-1;
     cbParserValue.ItemIndex:=-1;
 
@@ -243,11 +273,49 @@ procedure TEditProjectMainForm.SaveProject;
 var
   s:AnsiString;
   f:TFileStream;
+
+  procedure SaveMemo(const key: WideString; m: TMemo);
+  var
+    i,l:integer;
+    v:Variant;
+  begin
+    m.Lines.BeginUpdate;
+    try
+      l:=m.Lines.Count;
+      i:=l;
+      while i<>0 do
+       begin
+        dec(i);
+        if Trim(m.Lines[i])='' then
+         begin
+          m.Lines.Delete(i);
+          dec(l);
+         end;
+       end;
+      case l of
+        0:ProjectData.Delete(key);//ProjectData[key]:=Null;//?
+        1:ProjectData[key]:=m.Text;
+        else
+         begin
+          dec(l);
+          v:=VarArrayCreate([0,l],varOleStr);
+          for i:=0 to l do
+            v[i]:=m.Lines[i];
+          ProjectData[key]:=v;
+         end;
+      end;
+    finally
+      m.Lines.EndUpdate;
+    end;
+  end;
+
 begin
   if txtProjectName.Text='' then raise Exception.Create('Project name required');
   SaveParserValue;
   ProjectData['name']:=txtProjectName.Text;
-  ProjectData['compileCommand']:=txtCompileCommand.Text;//TODO: support array of strings
+  SaveMemo('preCompileCommand',txtPreCompCmds);
+  SaveMemo('compileCommand',txtCompCmds);
+  SaveMemo('postCompileCommand',txtPostCompCmds);
   ProjectData['lastModified']:=
     FormatDateTime('yyyy-mm-dd"T"hh:nn:ss',Now);//timezone?
   //TODO: files?
@@ -291,38 +359,6 @@ end;
 procedure TEditProjectMainForm.Open1Click(Sender: TObject);
 begin
   if CheckModified then LoadProject('',false);
-end;
-
-procedure TEditProjectMainForm.btnRegisterLocalClick(Sender: TObject);
-var
-  r:TRegistry;
-  s,t,u:string;
-begin
-  if CheckModified then
-   begin
-    t:=txtProjectName.Text;
-    if t='' then raise Exception.Create('Project name required');
-    s:=ProjectFolder+t+'.xxl';
-    r:=TRegistry.Create;
-    try
-      r.RootKey:=HKEY_CURRENT_USER;//HKEY_LOCAL_MACHINE;
-      r.OpenKey('\Software\xxm\local\'+t,true);
-      u:=r.ReadString('');
-      if (u='') or (u=s) or (MessageBox(GetDesktopWindow,PChar('Project "'+t+
-        '" was already registered as'#13#10'  '+u+
-        #13#10'Do you want to overwrite this registration?'#13#10'  '+s),
-        'xxm Project',MB_OKCANCEL or MB_ICONQUESTION or MB_SYSTEMMODAL)=idOK) then
-       begin
-        r.WriteString('',s);
-        r.DeleteValue('Signature');
-        //TODO: default settings?
-        MessageBox(GetDesktopWindow,PChar('Project "'+t+'" registered.'),
-          'xxm Project',MB_OK or MB_ICONINFORMATION);
-       end;
-    finally
-      r.Free;
-    end;
-   end;
 end;
 
 const
@@ -563,6 +599,7 @@ var
   nn:TFileNode;
   s:string;
   i,j:integer;
+  d:IJSONDocument;
 begin
   n:=tvFiles.Selected;
   nx:=n;
@@ -586,7 +623,13 @@ begin
       nn.Doc:=JSON;
       if j>1 then nn.Doc['unitPath']:=
         StringReplace(Copy(s,2,j-1),PathDelim,'/',[rfReplaceAll]);
-      JSON(ProjectData[nn.Col])[nn.Key]:=nn.Doc;
+      d:=JSON(ProjectData[nn.Col]);
+      if d=nil then
+       begin
+        d:=JSON;
+        ProjectData[nn.Col]:=d;
+       end;
+      d[nn.Key]:=nn.Doc;
       Modified:=true;
      end;
     iiFile:
@@ -595,7 +638,13 @@ begin
       nn.Col:='resources';
       nn.Key:=StringReplace(Copy(s,2,Length(s)),PathDelim,'/',[rfReplaceAll]);
       nn.Doc:=JSON;
-      JSON(ProjectData[nn.Col])[nn.Key]:=nn.Doc;
+      d:=JSON(ProjectData[nn.Col]);
+      if d=nil then
+       begin
+        d:=JSON;
+        ProjectData[nn.Col]:=d;
+       end;
+      d[nn.Key]:=nn.Doc;
       Modified:=true;
      end;
     //more?
@@ -728,12 +777,11 @@ end;
 procedure TEditProjectMainForm.btnRegisterFileClick(Sender: TObject);
 var
   fn,s,t,u:string;
-  v:AnsiString;
+  fu:UTF8string;
+  fd:WideString;
   i:integer;
   f:TFileStream;
   d,d1:IJSONDocument;
-const
-  Utf8ByteOrderMark=#$EF#$BB#$BF;
 begin
   if CheckModified then
    begin
@@ -743,34 +791,27 @@ begin
     if odXxmJson.Execute then
      begin
       fn:=odXxmJson.FileName;
-      //TRANSITIONAL
-      if LowerCase(Copy(fn,Length(fn)-3,4))='.xml' then
-       begin
-        s:=GetCurrentDir;
-        SetCurrentDir(ExtractFilePath(fn));
-        ConvertProjectReg;
-        SetCurrentDir(s);
-        fn:=Copy(fn,1,Length(fn)-4)+'.json';
-       end;
 
+      t:=LowerCase(t);
       d:=JSON;
       if FileExists(fn) then
        begin
         f:=TFileStream.Create(fn,fmOpenRead or fmShareDenyWrite);
         try
           i:=f.Size;
-          SetLength(v,i);
-          if i<>f.Read(v[1],i) then RaiseLastOSError;
-          if (i>=3) and (v[1]=#$EF) and (v[2]=#$BB) and (v[3]=#$BF) then
-            d.Parse(UTF8ToWideString(Copy(v,4,i-3)))
+          SetLength(fu,i);
+          if i<>f.Read(fu[1],i) then RaiseLastOSError;
+          if (i>=3) and (fu[1]=#$EF) and (fu[2]=#$BB) and (fu[3]=#$BF) then
+            fd:=UTF8ToWideString(Copy(fu,4,i-3))
           else
-          if (i>=2) and (v[1]=#$FF) and (v[2]=#$FE) then
-            d.Parse(PWideChar(@v[1]))
+          if (i>=2) and (fu[1]=#$FF) and (fu[2]=#$FE) then
+            fd:=PWideChar(@fu[1])
           else
-            d.Parse(WideString(v));
+            fd:=WideString(fu);
         finally
           f.Free;
         end;
+        d.Parse(fd);
        end
       else
         d['projects']:=JSON;
@@ -792,10 +833,10 @@ begin
           d1.Delete('alias');//?
          end;
         d1['path']:=StringReplace(s,PathDelim,'/',[rfReplaceAll]);
-        v:=Utf8ByteOrderMark+UTF8Encode(d.ToString);
+        fu:=#$EF#$BB#$BF+UTF8Encode(d.ToString);
         f:=TFileStream.Create(fn,fmCreate);
         try
-          f.Write(v[1],Length(v));
+          f.Write(fu[1],Length(fu));
         finally
           f.Free;
         end;

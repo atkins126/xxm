@@ -11,12 +11,9 @@ uses
   xxmUtilities in 'xxmUtilities.pas',
   xxmWebProject in 'xxmWebProject.pas',
   jsonDoc in '..\common\jsonDoc.pas',
-  MSXML2_TLB in '..\common\MSXML2_TLB.pas',
   xxmProtoParse in 'xxmProtoParse.pas',
   xxmPageParse in 'xxmPageParse.pas',
-  xxmCommonUtils in '..\common\xxmCommonUtils.pas',
-  xxmConvert2 in 'xxmConvert2.pas',
-  xxmConvertXML in '..\common\xxmConvertXML.pas';
+  xxmCommonUtils in '..\common\xxmCommonUtils.pas';
 
 {$R *.res}
 
@@ -53,8 +50,6 @@ begin
       Writeln('    /x:XXX        define template value XXX');
       Writeln('  xxmConv /install');
       Writeln('    registers a context-menu compile option on xxmp file type');
-      Writeln('  xxmConv /xmltojson');
-      Writeln('    convert xxm.xml to xxm.json');
      end;
 
     i:=1;
@@ -72,7 +67,6 @@ begin
          begin
           s:=LowerCase(s);
           if s='/install' then RegisterCompileOption else
-          if s='/xmltojson' then ConvertProjectReg else
           if s='/wait' then wait:=true else
           if s='/rebuild' then rebuild:=true else
           if s='/nocompile' then docompile:=false else
